@@ -10,8 +10,10 @@ The ledger of points is [restore-points.md](restore-points.md).
 
 ```bash
 jj bookmark list
-jj log
+jj log -r '::@'
 ```
+
+The default `jj log` can skip older immutable points. `jj bookmark list` is the full list.
 
 ## Start new work from a restore point
 
