@@ -412,33 +412,18 @@ impl eframe::App for AlignerWindow {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let busy = self.running();
 
-        let log_h = (ui.available_height() * 0.32).clamp(120.0, 420.0);
-        egui::Panel::bottom("log-panel")
-            .resizable(true)
-            .default_size(log_h)
-            .min_size(100.0)
-            .max_size(680.0)
-            .show(ui, |ui| {
-                ui.strong("Log");
-                egui::ScrollArea::vertical()
-                    .id_salt("log")
-                    .stick_to_bottom(true)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(&self.log).monospace())
-                                .selectable(true)
-                                .wrap(),
-                        );
-                    });
-            });
-
         egui::CentralPanel::default().show(ui, |ui| {
             self.header(ui);
-            ui.add_space(8.0);
+            ui.add_space(6.0);
+
+            // The form stays as short as its cards. Extra window height goes to the log.
+            let action_h = 36.0;
+            let log_min = 120.0;
+            let form_max = (ui.available_height() - action_h - log_min - 16.0).max(160.0);
             egui::ScrollArea::vertical()
                 .id_salt("form")
-                .auto_shrink([false, false])
+                .max_height(form_max)
+                .auto_shrink([false, true])
                 .show(ui, |ui| {
                     if self.show_settings {
                         self.settings_ui(ui, busy);
@@ -446,22 +431,41 @@ impl eframe::App for AlignerWindow {
                         self.queue_ui(ui, busy);
                         ui.add_space(8.0);
                         egui::Frame::group(ui.style()).show(ui, |ui| {
-                            ui.strong("Options");
+                            ui.horizontal(|ui| {
+                                ui.strong("Options");
+                                tip_button(ui, "These choices apply to every row in the queue.");
+                            });
                             ui.add_space(4.0);
                             self.options(ui, busy);
                         });
                     }
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        let run = egui::Button::new(self.run_label());
-                        if ui.add_enabled(!busy, run).clicked() {
-                            self.start();
-                        }
-                        if ui.add_enabled(busy, egui::Button::new("Stop")).clicked() {
-                            self.stop();
-                        }
-                        ui.label(&self.status);
-                    });
+                });
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let run = egui::Button::new(self.run_label()).fill(ui.visuals().selection.bg_fill);
+                if ui.add_enabled(!busy, run).clicked() {
+                    self.start();
+                }
+                if ui.add_enabled(busy, egui::Button::new("Stop")).clicked() {
+                    self.stop();
+                }
+                ui.label(egui::RichText::new(&self.status).weak());
+            });
+
+            ui.add_space(6.0);
+            ui.separator();
+            ui.strong("Log");
+            egui::ScrollArea::vertical()
+                .id_salt("log")
+                .stick_to_bottom(true)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(&self.log).monospace())
+                            .selectable(true)
+                            .wrap(),
+                    );
                 });
         });
     }
@@ -472,7 +476,14 @@ impl AlignerWindow {
         let busy = self.running();
         ui.horizontal(|ui| {
             ui.heading("starlign");
-            ui.add_space(16.0);
+            tip_button(
+                ui,
+                &format!(
+                    "{}\n\nA book that fails is logged, and the next one starts. Stop ends the current book and leaves the rest.",
+                    self.mode.summary()
+                ),
+            );
+            ui.add_space(8.0);
             if self.show_advanced {
                 for mode in [Mode::Run, Mode::Align, Mode::Emit] {
                     if ui
@@ -499,12 +510,6 @@ impl AlignerWindow {
                 }
             });
         });
-        if !self.show_settings {
-            ui.label(self.mode.summary());
-            ui.weak(
-                "A book that fails is logged, and the next one starts. Stop ends the current book and leaves the rest.",
-            );
-        }
     }
 }
 
@@ -517,24 +522,29 @@ enum RowAction {
 impl AlignerWindow {
     fn queue_ui(&mut self, ui: &mut egui::Ui, busy: bool) {
         egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.strong("Queue");
             ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(!busy, egui::Button::new("Add pair…"))
-                    .clicked()
-                {
-                    self.add_pair_from_dialog();
-                }
-                if ui
-                    .add_enabled(!busy, egui::Button::new("Add row"))
-                    .clicked()
-                {
-                    self.pairs.push(PairRow::default());
-                }
-                ui.weak(if self.mode == Mode::Emit {
-                    "Each row is one audiobook. Edit a path, or use Browse."
-                } else {
-                    "Each row is one audiobook and one EPUB. Edit a path, or use Browse."
+                ui.strong("Queue");
+                tip_button(
+                    ui,
+                    if self.mode == Mode::Emit {
+                        "Each row is one audiobook. Add pair chooses the file. Add row leaves a blank path to type."
+                    } else {
+                        "Each row is one audiobook and one EPUB. Add pair chooses the files. Add row leaves blank paths to type. Up and Down change the order."
+                    },
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Add row"))
+                        .clicked()
+                    {
+                        self.pairs.push(PairRow::default());
+                    }
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Add pair…"))
+                        .clicked()
+                    {
+                        self.add_pair_from_dialog();
+                    }
                 });
             });
             ui.add_space(4.0);
@@ -549,11 +559,15 @@ impl AlignerWindow {
                 if self.running_index == Some(i) {
                     ui.scroll_to_cursor(Some(egui::Align::Center));
                 }
+                let preview = row_preview(self.mode, &self.pairs[i], &self.emissions, queued.max(1));
                 ui.group(|ui| {
                     ui.horizontal(|ui| {
                         ui.label(format!("{}", i + 1));
                         if self.running_index == Some(i) {
                             ui.strong("Running");
+                        }
+                        if let Some(preview) = &preview {
+                            tip_button(ui, preview);
                         }
                         if ui
                             .add_enabled(!busy && i > 0, egui::Button::new("Up").small())
@@ -583,6 +597,7 @@ impl AlignerWindow {
                         &[("Audio", AUDIO_EXTS)],
                         false,
                         false,
+                        None,
                     );
                     if self.mode != Mode::Emit {
                         let _ = path_row(
@@ -594,12 +609,8 @@ impl AlignerWindow {
                             &[("EPUB", &["epub"])],
                             false,
                             false,
+                            None,
                         );
-                    }
-                    if let Some(preview) =
-                        row_preview(self.mode, &self.pairs[i], &self.emissions, queued.max(1))
-                    {
-                        ui.add(egui::Label::new(egui::RichText::new(preview).weak()).wrap());
                     }
                 });
             }
@@ -615,6 +626,7 @@ impl AlignerWindow {
 
             ui.add_space(6.0);
             let save_emissions = self.mode != Mode::Align;
+            let emissions_tip = emissions_tip(self.mode);
             let _ = path_row(
                 ui,
                 "Emissions",
@@ -624,19 +636,8 @@ impl AlignerWindow {
                 &[("Emissions", &["emissions"])],
                 save_emissions,
                 true,
+                Some(&emissions_tip),
             );
-            ui.add(egui::Label::new(egui::RichText::new(emissions_hint(self.mode)).weak()).wrap());
-            if self.mode != Mode::Emit {
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(
-                            "Each aligned EPUB is written next to its source as Name-aligned.epub.",
-                        )
-                        .weak(),
-                    )
-                    .wrap(),
-                );
-            }
         });
     }
 
@@ -644,8 +645,14 @@ impl AlignerWindow {
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.strong("Settings");
             ui.add_space(6.0);
-            ui.label("Size");
             ui.horizontal(|ui| {
+                ui.label("Size");
+                tip_button(
+                    ui,
+                    "Scales text and controls together. 100% is the normal size. The choice is remembered.",
+                );
+                let slider_width = (ui.available_width() - 52.0).max(80.0);
+                ui.spacing_mut().slider_width = slider_width;
                 let response = ui.add(
                     egui::Slider::new(&mut self.ui_scale, 0.75..=1.75)
                         .step_by(0.05)
@@ -657,34 +664,30 @@ impl AlignerWindow {
                     self.save_settings();
                 }
             });
-            ui.weak("Scales text and controls together. 100% is the normal size.");
-            ui.add_space(10.0);
-            ui.add_enabled_ui(!busy, |ui| {
-                if ui
-                    .checkbox(&mut self.show_advanced, "Show Align and Emit")
-                    .changed()
-                {
-                    if !self.show_advanced && self.mode != Mode::Run {
-                        let idle = self.status == Mode::Align.idle_status()
-                            || self.status == Mode::Emit.idle_status()
-                            || self.status == Mode::Run.idle_status();
-                        self.mode = Mode::Run;
-                        if idle {
-                            self.status = Mode::Run.idle_status().into();
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.add_enabled_ui(!busy, |ui| {
+                    if ui
+                        .checkbox(&mut self.show_advanced, "Show Align and Emit")
+                        .changed()
+                    {
+                        if !self.show_advanced && self.mode != Mode::Run {
+                            let idle = self.status == Mode::Align.idle_status()
+                                || self.status == Mode::Emit.idle_status()
+                                || self.status == Mode::Run.idle_status();
+                            self.mode = Mode::Run;
+                            if idle {
+                                self.status = Mode::Run.idle_status().into();
+                            }
                         }
+                        self.save_settings();
                     }
-                    self.save_settings();
-                }
+                });
+                tip_button(
+                    ui,
+                    "Full run is the usual job. It decodes the audiobook and writes the aligned EPUB. Align reuses an emissions file that already exists. Emit only writes that file. Turning this off returns the window to Full run.",
+                );
             });
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(
-                        "Full run is the usual job. It decodes the audiobook and writes the aligned EPUB. Align reuses an emissions file that already exists. Emit only writes that file.",
-                    )
-                    .weak(),
-                )
-                .wrap(),
-            );
         });
     }
 
@@ -708,24 +711,36 @@ impl AlignerWindow {
     fn options(&mut self, ui: &mut egui::Ui, busy: bool) {
         ui.add_enabled_ui(!busy, |ui| {
             if self.mode != Mode::Emit {
+                let wide = ui.available_width() > 760.0;
                 ui.horizontal(|ui| {
                     ui.label("Granularity");
                     ui.selectable_value(&mut self.granularity_words, false, "Sentence");
                     ui.selectable_value(&mut self.granularity_words, true, "Word");
-                    ui.add_space(16.0);
-                    ui.label("Gap seconds");
-                    ui.add(egui::TextEdit::singleline(&mut self.gap_seconds).desired_width(64.0));
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Max seconds");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.max_seconds)
-                            .desired_width(80.0)
-                            .hint_text("whole file"),
+                    tip_button(
+                        ui,
+                        "Sentence is the usual highlight. Word highlights each word inside the sentence.",
                     );
-                    ui.label("Leave empty to use each whole audiobook. These options apply to every row.");
+                    if wide {
+                        ui.add_space(16.0);
+                        gap_field(ui, &mut self.gap_seconds);
+                        ui.add_space(16.0);
+                        max_field(ui, &mut self.max_seconds);
+                    }
                 });
-                ui.checkbox(&mut self.drop_unread, "Leave out sentences the aligner could not place");
+                if !wide {
+                    ui.horizontal(|ui| {
+                        gap_field(ui, &mut self.gap_seconds);
+                        ui.add_space(16.0);
+                        max_field(ui, &mut self.max_seconds);
+                    });
+                }
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.drop_unread, "Drop unplaced sentences");
+                    tip_button(
+                        ui,
+                        "Leave sentences the aligner could not place out of the overlay. Off keeps them in, timed between their neighbors.",
+                    );
+                });
                 let _ = path_row(
                     ui,
                     "Report",
@@ -735,6 +750,7 @@ impl AlignerWindow {
                     &[("JSON", &["json"])],
                     true,
                     true,
+                    Some("Optional JSON report. One book writes a file. A queue needs a folder, with one JSON per audiobook."),
                 );
             }
             if self.mode != Mode::Align {
@@ -743,6 +759,10 @@ impl AlignerWindow {
                     ui.selectable_value(&mut self.device, DeviceChoice::Auto, "Auto");
                     ui.selectable_value(&mut self.device, DeviceChoice::Cuda, "CUDA");
                     ui.selectable_value(&mut self.device, DeviceChoice::Cpu, "CPU");
+                    tip_button(
+                        ui,
+                        "Auto uses CUDA when the runtime can load it, and CPU otherwise. CUDA and CPU force that device.",
+                    );
                 });
                 let _ = path_row(
                     ui,
@@ -753,14 +773,59 @@ impl AlignerWindow {
                     &[("ONNX", &["onnx"])],
                     false,
                     false,
+                    Some("Optional ONNX file. Empty uses a cached MMS-300M model, or models/mms-fp16.onnx."),
                 );
-                ui.checkbox(
-                    &mut self.download,
-                    "Download the MMS-300M model if it is missing (CC-BY-NC 4.0)",
-                );
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.download, "Download the model if it is missing");
+                    tip_button(
+                        ui,
+                        "Downloads the MMS-300M fp16 ONNX weights when the model file is missing. The weights are CC-BY-NC 4.0.",
+                    );
+                });
             }
         });
     }
+}
+
+/// Small "i" control. Hover shows the tip. Click keeps it open.
+fn tip_button(ui: &mut egui::Ui, text: &str) {
+    let response = ui
+        .add(
+            egui::Button::new(egui::RichText::new("i").small().strong())
+                .small()
+                .min_size(egui::vec2(18.0, 18.0))
+                .corner_radius(egui::CornerRadius::same(9)),
+        )
+        .on_hover_text(text);
+    egui::Popup::from_toggle_button_response(&response)
+        .width(320.0)
+        .gap(4.0)
+        .show(|ui| {
+            ui.set_max_width(300.0);
+            ui.label(text);
+        });
+}
+
+fn gap_field(ui: &mut egui::Ui, gap_seconds: &mut String) {
+    ui.label("Gap seconds");
+    ui.add(egui::TextEdit::singleline(gap_seconds).desired_width(64.0));
+    tip_button(
+        ui,
+        "A pause longer than this stays dark. A shorter pause extends the previous highlight. 3 seconds is the usual value. 0 keeps every gap.",
+    );
+}
+
+fn max_field(ui: &mut egui::Ui, max_seconds: &mut String) {
+    ui.label("Max seconds");
+    ui.add(
+        egui::TextEdit::singleline(max_seconds)
+            .desired_width(80.0)
+            .hint_text("whole file"),
+    );
+    tip_button(
+        ui,
+        "Only the first N seconds of each audiobook. Empty uses the whole file.",
+    );
 }
 
 fn settings_path() -> PathBuf {
@@ -796,6 +861,14 @@ fn decode_settings(text: &str) -> (f32, bool) {
         }
     }
     (scale, advanced)
+}
+
+fn emissions_tip(mode: Mode) -> String {
+    let mut tip = emissions_hint(mode).to_string();
+    if mode != Mode::Emit {
+        tip.push_str(" Each aligned EPUB is written next to its source as Name-aligned.epub.");
+    }
+    tip
 }
 
 fn emissions_hint(mode: Mode) -> &'static str {
@@ -1206,10 +1279,20 @@ fn path_row(
     filters: &[(&str, &[&str])],
     save: bool,
     folder: bool,
+    tip: Option<&str>,
 ) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
-        ui.add_sized([92.0, 18.0], egui::Label::new(label));
+        ui.allocate_ui_with_layout(
+            egui::vec2(128.0, ui.spacing().interact_size.y),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.label(label);
+                if let Some(tip) = tip {
+                    tip_button(ui, tip);
+                }
+            },
+        );
         let buttons = if folder { 200.0 } else { 96.0 };
         let edit = egui::TextEdit::singleline(value)
             .desired_width((ui.available_width() - buttons).max(80.0));
