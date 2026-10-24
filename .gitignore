@@ -1,0 +1,19 @@
+# Cargo build tree. Rebuild from stalign/ with cargo.
+/stalign/target/
+
+# ONNX Runtime, CUDA, and cuDNN. stalign/dist/lib is a symlink to this directory.
+/stalign/runtime/lib/
+
+# Launch binary and dated copies. Larger than jj's snapshot size limit.
+/stalign/dist/starlign
+/stalign/dist/starlign-*
+
+# MMS weights (CC-BY-NC 4.0). Download on use.
+/models/
+
+# Audiobook, EPUBs, and generated emissions. They stay on disk across a restore.
+/emission/
+*.epub
+*.m4b
+*.onnx
+*.emissions
