@@ -25,7 +25,8 @@ pub fn launch() -> Result<()> {
     eframe::run_native(
         "starlign",
         options,
-        Box::new(|_cc| {
+        Box::new(|cc| {
+            apply_style(&cc.egui_ctx);
             let mut window = AlignerWindow::default();
             window.load_settings();
             Ok(Box::new(window))
@@ -412,12 +413,13 @@ impl eframe::App for AlignerWindow {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let busy = self.running();
 
-        egui::CentralPanel::default().show(ui, |ui| {
+        let frame = egui::Frame::central_panel(ui.style()).inner_margin(egui::Margin::same(16));
+        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             self.header(ui);
             ui.add_space(6.0);
 
             // The form stays as short as its cards. Extra window height goes to the log.
-            let action_h = 36.0;
+            let action_h = 44.0;
             let log_min = 120.0;
             let form_max = (ui.available_height() - action_h - log_min - 16.0).max(160.0);
             egui::ScrollArea::vertical()
@@ -430,7 +432,7 @@ impl eframe::App for AlignerWindow {
                     } else {
                         self.queue_ui(ui, busy);
                         ui.add_space(8.0);
-                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                        card_frame(ui.style()).show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.strong("Options");
                                 tip_button(ui, "These choices apply to every row in the queue.");
@@ -521,7 +523,7 @@ enum RowAction {
 
 impl AlignerWindow {
     fn queue_ui(&mut self, ui: &mut egui::Ui, busy: bool) {
-        egui::Frame::group(ui.style()).show(ui, |ui| {
+        card_frame(ui.style()).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.strong("Queue");
                 tip_button(
@@ -642,7 +644,7 @@ impl AlignerWindow {
     }
 
     fn settings_ui(&mut self, ui: &mut egui::Ui, busy: bool) {
-        egui::Frame::group(ui.style()).show(ui, |ui| {
+        card_frame(ui.style()).show(ui, |ui| {
             ui.strong("Settings");
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -711,7 +713,6 @@ impl AlignerWindow {
     fn options(&mut self, ui: &mut egui::Ui, busy: bool) {
         ui.add_enabled_ui(!busy, |ui| {
             if self.mode != Mode::Emit {
-                let wide = ui.available_width() > 760.0;
                 ui.horizontal(|ui| {
                     ui.label("Granularity");
                     ui.selectable_value(&mut self.granularity_words, false, "Sentence");
@@ -720,20 +721,12 @@ impl AlignerWindow {
                         ui,
                         "Sentence is the usual highlight. Word highlights each word inside the sentence.",
                     );
-                    if wide {
-                        ui.add_space(16.0);
-                        gap_field(ui, &mut self.gap_seconds);
-                        ui.add_space(16.0);
-                        max_field(ui, &mut self.max_seconds);
-                    }
                 });
-                if !wide {
-                    ui.horizontal(|ui| {
-                        gap_field(ui, &mut self.gap_seconds);
-                        ui.add_space(16.0);
-                        max_field(ui, &mut self.max_seconds);
-                    });
-                }
+                ui.horizontal(|ui| {
+                    gap_field(ui, &mut self.gap_seconds);
+                    ui.add_space(18.0);
+                    max_field(ui, &mut self.max_seconds);
+                });
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut self.drop_unread, "Drop unplaced sentences");
                     tip_button(
@@ -787,23 +780,91 @@ impl AlignerWindow {
     }
 }
 
-/// Small "i" control. Hover shows the tip. Click keeps it open.
+/// Information mark. Hover shows the tip. Click keeps it open.
 fn tip_button(ui: &mut egui::Ui, text: &str) {
-    let response = ui
-        .add(
-            egui::Button::new(egui::RichText::new("i").small().strong())
-                .small()
-                .min_size(egui::vec2(18.0, 18.0))
-                .corner_radius(egui::CornerRadius::same(9)),
-        )
+    let size = 18.0;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let color = if response.hovered() {
+            ui.visuals().strong_text_color()
+        } else {
+            ui.visuals().text_color()
+        };
+        paint_info_icon(ui.painter(), rect, color);
+    }
+    let response = response
+        .on_hover_cursor(egui::CursorIcon::Help)
         .on_hover_text(text);
     egui::Popup::from_toggle_button_response(&response)
         .width(320.0)
-        .gap(4.0)
+        .gap(6.0)
         .show(|ui| {
             ui.set_max_width(300.0);
             ui.label(text);
         });
+}
+
+fn paint_info_icon(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    let center = rect.center();
+    let radius = rect.width() * 0.46;
+    painter.circle_stroke(center, radius, egui::Stroke::new(1.6, color));
+    painter.circle_filled(
+        center + egui::vec2(0.0, -radius * 0.38),
+        radius * 0.13,
+        color,
+    );
+    painter.line_segment(
+        [
+            center + egui::vec2(0.0, -radius * 0.08),
+            center + egui::vec2(0.0, radius * 0.46),
+        ],
+        egui::Stroke::new(1.6, color),
+    );
+}
+
+fn card_frame(style: &egui::Style) -> egui::Frame {
+    egui::Frame::group(style).inner_margin(egui::Margin::same(14))
+}
+
+fn apply_style(ctx: &egui::Context) {
+    ctx.all_styles_mut(|style| {
+        style.text_styles.insert(
+            egui::TextStyle::Small,
+            egui::FontId::new(12.0, egui::FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Body,
+            egui::FontId::new(16.0, egui::FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Button,
+            egui::FontId::new(15.0, egui::FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Heading,
+            egui::FontId::new(24.0, egui::FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Monospace,
+            egui::FontId::new(14.0, egui::FontFamily::Monospace),
+        );
+        style.spacing.item_spacing = egui::vec2(10.0, 8.0);
+        style.spacing.button_padding = egui::vec2(12.0, 6.0);
+        style.spacing.interact_size.y = 30.0;
+        style.spacing.window_margin = egui::Margin::same(14);
+        style.spacing.icon_width = 16.0;
+        style.spacing.icon_spacing = 8.0;
+        let radius = egui::CornerRadius::same(6);
+        for visuals in [
+            &mut style.visuals.widgets.noninteractive,
+            &mut style.visuals.widgets.inactive,
+            &mut style.visuals.widgets.hovered,
+            &mut style.visuals.widgets.active,
+            &mut style.visuals.widgets.open,
+        ] {
+            visuals.corner_radius = radius;
+        }
+    });
 }
 
 fn gap_field(ui: &mut egui::Ui, gap_seconds: &mut String) {
@@ -819,7 +880,7 @@ fn max_field(ui: &mut egui::Ui, max_seconds: &mut String) {
     ui.label("Max seconds");
     ui.add(
         egui::TextEdit::singleline(max_seconds)
-            .desired_width(80.0)
+            .desired_width(128.0)
             .hint_text("whole file"),
     );
     tip_button(
@@ -1284,7 +1345,7 @@ fn path_row(
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.allocate_ui_with_layout(
-            egui::vec2(128.0, ui.spacing().interact_size.y),
+            egui::vec2(156.0, ui.spacing().interact_size.y),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
                 ui.label(label);
