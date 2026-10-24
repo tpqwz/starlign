@@ -60,10 +60,11 @@ To rebuild the launch binary from a checked-out source tree:
 ```bash
 cd stalign
 cargo build --offline --release
-cp -a target/release/starlign dist/starlign
+cp -a target/release/starlign dist/starlign.new
+mv -f dist/starlign.new dist/starlign
 ```
 
-Copying onto `dist/starlign` while a window is open does not change that process. The running process keeps the inode it started with. The new binary is what the next start runs. `dist/lib` must still be the symlink to `../runtime/lib`.
+`cp` onto a running `dist/starlign` fails with "Text file busy". Copy to a new name, then `mv` it into place. The running process keeps the inode it started with (`/proc/<pid>/exe` shows `(deleted)`). The new binary is what the next start runs. `dist/lib` must still be the symlink to `../runtime/lib`.
 
 ## Make another restore point
 
@@ -72,9 +73,6 @@ On the change you want to keep:
 ```bash
 jj describe -m "Restore point: what this snapshot is."
 jj bookmark create restore-YYYY-MM-DD-short-name
-jj new
 ```
 
-`jj new` matters. The working copy is a commit, and further edits amend it. A bookmark on that commit would move with the amend until you start a child. After `jj new`, the bookmark stays on the parent. Immutable bookmarks cannot be amended anyway.
-
-Then add a row to `docs/restore-points.md` on the new change.
+Creating that bookmark makes the working-copy commit immutable. jj then moves `@` to a new child, so later edits do not rewrite the point. Add the ledger row in `docs/restore-points.md` before the bookmark if that row should be inside the snapshot. Add it after if it should describe the point from the next change.
