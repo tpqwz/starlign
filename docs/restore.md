@@ -49,10 +49,10 @@ These are ignored. A restore leaves them on disk and cannot recreate them:
 | Path | Why it is outside history |
 | --- | --- |
 | `models/mms-fp16.onnx` | MMS weights, CC-BY-NC 4.0 |
-| `stalign/runtime/lib/` | ONNX Runtime and CUDA, about 1.5GB. `stalign/dist/lib` points here |
-| `stalign/target/` | Cargo output |
-| `stalign/dist/starlign` | Launch binary, about 17MB, over the 1MiB snapshot limit |
-| `stalign/dist/starlign-2026-10-24-0147` | Copy of the 01:47 binary, sha256 `b9790455a6354f871d4fbfcfb56a140ec8889bd1b14209552ee4fee6f3aa1935` |
+| `starlign/runtime/lib/` | ONNX Runtime and CUDA, about 1.5GB. `starlign/dist/lib` points here |
+| `starlign/target/` | Cargo output |
+| `starlign/dist/starlign` | Launch binary, about 17MB, over the 1MiB snapshot limit |
+| `starlign/dist/starlign-2026-10-24-0147` | Copy of the 01:47 binary, sha256 `b9790455a6354f871d4fbfcfb56a140ec8889bd1b14209552ee4fee6f3aa1935` |
 | `*.m4b`, `*.epub`, `emission/`, `*.emissions`, `*.emissions.tracks.json` | The audiobook, the source EPUB, the aligned EPUBs, and cached emissions |
 
 Do not delete those to "clean up" a restore. The reference book is `aligned.epub`. The full-book alignment from emissions is `/tmp/recovery-aligned.epub`. The GUI test wrote `Recovery—The Sacred Art (The Art of Spiritual Living)-aligned.epub`.
@@ -60,7 +60,7 @@ Do not delete those to "clean up" a restore. The reference book is `aligned.epub
 To rebuild the launch binary from a checked-out source tree:
 
 ```bash
-cd stalign
+cd starlign
 cargo build --offline --release
 cp -a target/release/starlign dist/starlign.new
 mv -f dist/starlign.new dist/starlign

@@ -1,0 +1,42 @@
+# Builds starlign on GitHub's Mac runners. This does not run until someone
+# starts it from the Actions tab. See docs/macos.md.
+name: macOS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            archive: onnxruntime-osx-arm64-1.22.0
+          - target: x86_64-apple-darwin
+            archive: onnxruntime-osx-x86_64-1.22.0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        working-directory: starlign
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Place the official ONNX Runtime dylib beside the binary
+        run: |
+          set -euo pipefail
+          url="https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/${{ matrix.archive }}.tgz"
+          curl -fsSL -o ort.tgz "$url"
+          tar -xzf ort.tgz
+          stage="starlign-${{ matrix.target }}"
+          mkdir -p "$stage/lib"
+          cp -a "${{ matrix.archive }}/lib/"*.dylib "$stage/lib/"
+          cp "starlign/target/${{ matrix.target }}/release/starlign" "$stage/starlign"
+          chmod +x "$stage/starlign"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: starlign-${{ matrix.target }}
+          path: starlign-${{ matrix.target }}

@@ -1754,7 +1754,7 @@ mod tests {
             data: vec![0.0, -1.0, -1.0, 0.0],
             times: vec![0.1, 0.3],
         };
-        let path = std::env::temp_dir().join("stalign-emissions-test.bin");
+        let path = std::env::temp_dir().join("starlign-emissions-test.bin");
         emissions.save(&path).unwrap();
         let loaded = Emissions::load(&path).unwrap();
         assert_eq!(loaded.data, emissions.data);

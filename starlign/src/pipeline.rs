@@ -874,7 +874,7 @@ pub fn ensure_model(path: &Path, download: bool) -> Result<()> {
 
 fn temp_pcm() -> PathBuf {
     std::env::temp_dir().join(format!(
-        "stalign-{}-{}.f32",
+        "starlign-{}-{}.f32",
         std::process::id(),
         std::process::id()
     ))

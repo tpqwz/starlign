@@ -491,7 +491,7 @@ mod tests {
 
     #[test]
     fn decodes_wav_and_resamples_to_16k() {
-        let dir = std::env::temp_dir().join(format!("stalign-wav-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("starlign-wav-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let wav = dir.join("tone.wav");

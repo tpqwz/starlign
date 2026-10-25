@@ -1,12 +1,12 @@
-# Cargo build tree. Rebuild from stalign/ with cargo.
-/stalign/target/
+# Cargo build tree. Rebuild from starlign/ with cargo.
+/starlign/target/
 
-# ONNX Runtime, CUDA, and cuDNN. stalign/dist/lib is a symlink to this directory.
-/stalign/runtime/lib/
+# ONNX Runtime, CUDA, and cuDNN. starlign/dist/lib is a symlink to this directory.
+/starlign/runtime/lib/
 
 # Launch binary and dated copies. Larger than jj's snapshot size limit.
-/stalign/dist/starlign
-/stalign/dist/starlign-*
+/starlign/dist/starlign
+/starlign/dist/starlign-*
 
 # MMS weights (CC-BY-NC 4.0). Download on use.
 /models/

@@ -1,0 +1,13 @@
+starlign
+Copyright (c) 2026 tpqwz
+
+This program is licensed under the MIT License. See the LICENSE file.
+
+The anchor fitting and the rules that skip non-narrated spine items adapt
+the MIT-licensed aligner in Storyteller's libraries/align, by Shane Friedman
+and contributors:
+
+https://gitlab.com/storyteller-platform/storyteller
+
+The MMS-300M weights are not part of this repository. They are licensed
+CC-BY-NC 4.0 and are downloaded separately.

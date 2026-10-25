@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Standalone CTC audiobook aligner. One binary, ONNX Runtime, CUDA when the driver is there."
 license = "MIT"
+authors = ["tpqwz"]
 publish = false
 
 [[bin]]
