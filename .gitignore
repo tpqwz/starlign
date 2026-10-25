@@ -11,6 +11,9 @@
 # MMS weights (CC-BY-NC 4.0). Download on use.
 /models/
 
+# Local Storyteller compose file.
+/compose.yaml
+
 # Audiobook, EPUBs, and generated emissions. They stay on disk across a restore.
 /emission/
 *.epub
