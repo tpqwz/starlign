@@ -2,7 +2,7 @@
 name = "starlign"
 version = "0.1.0"
 edition = "2021"
-description = "Beta. Standalone CTC audiobook aligner. One binary, ONNX Runtime, CUDA when the driver is there."
+description = "Alpha. Standalone CTC audiobook aligner. One binary, ONNX Runtime, CUDA when the driver is there."
 license = "MIT"
 authors = ["tpqwz"]
 publish = false

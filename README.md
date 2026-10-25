@@ -1,6 +1,6 @@
 # starlign
 
-This is beta. The tool is early, and it may still shift.
+This is alpha. The tool is early, and it may still shift.
 
 starlign lines up an audiobook with an EPUB and writes an EPUB 3 media overlay. The sound is put in as it was. It is not made again.
 
