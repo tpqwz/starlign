@@ -26,9 +26,9 @@ pub fn launch() -> Result<()> {
         "starlign",
         options,
         Box::new(|cc| {
-            apply_style(&cc.egui_ctx);
             let mut window = AlignerWindow::default();
             window.load_settings();
+            apply_style(&cc.egui_ctx, window.paper);
             Ok(Box::new(window))
         }),
     )
@@ -63,6 +63,25 @@ impl Mode {
             Mode::Align => "Reads emissions that already exist. This does not decode the audiobook again.",
             Mode::Run => "Decodes each audiobook, writes emissions, and aligns. An existing emissions file is reused.",
             Mode::Emit => "Decodes each audiobook and writes its emissions file. The EPUB column is unused.",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SplitMode {
+    Off,
+    Chapter,
+    Duration,
+    Parts,
+}
+
+impl SplitMode {
+    fn label(self) -> &'static str {
+        match self {
+            SplitMode::Off => "Off",
+            SplitMode::Chapter => "Chapter",
+            SplitMode::Duration => "Duration",
+            SplitMode::Parts => "Equal parts",
         }
     }
 }
@@ -113,11 +132,19 @@ pub struct AlignerWindow {
     model: String,
     download: bool,
     drop_unread: bool,
+    /// Chapter is the selected default. The other choices cut differently, or not at all.
+    split_mode: SplitMode,
+    /// Seconds for Duration, or the number of files for Equal parts.
+    split_value: String,
     reports: String,
     /// Scales text and controls together. 1.0 is the normal size.
     ui_scale: f32,
+    /// Paper is the light theme. Dark is the other one.
+    paper: bool,
     /// Align and Emit stay hidden until this is turned on in Settings.
     show_advanced: bool,
+    /// Granularity, gap, max seconds, and the other tuning controls.
+    show_options: bool,
     show_settings: bool,
     log: String,
     status: String,
@@ -140,11 +167,15 @@ impl Default for AlignerWindow {
             max_seconds: String::new(),
             device: DeviceChoice::Auto,
             model: String::new(),
-            download: false,
+            download: true,
             drop_unread: false,
+            split_mode: SplitMode::Chapter,
+            split_value: String::new(),
             reports: String::new(),
             ui_scale: 1.0,
+            paper: false,
             show_advanced: false,
+            show_options: false,
             show_settings: false,
             log: String::new(),
             status: Mode::Run.idle_status().into(),
@@ -284,18 +315,29 @@ impl AlignerWindow {
         if self.running() {
             return;
         }
+        let tune = self.show_options;
         let planned = match plan_queue(
             self.mode,
             &self.pairs,
-            &self.emissions,
-            self.granularity_words,
-            &self.gap_seconds,
-            &self.max_seconds,
-            self.device,
-            &self.model,
+            if tune || self.mode == Mode::Align {
+                self.emissions.as_str()
+            } else {
+                ""
+            },
+            tune && self.granularity_words,
+            if tune { self.gap_seconds.as_str() } else { "3" },
+            if tune { self.max_seconds.as_str() } else { "" },
+            if tune {
+                self.device
+            } else {
+                DeviceChoice::Auto
+            },
+            if tune { self.model.as_str() } else { "" },
             self.download,
-            self.drop_unread,
-            &self.reports,
+            tune && self.drop_unread,
+            self.split_mode,
+            &self.split_value,
+            if tune { self.reports.as_str() } else { "" },
         ) {
             Ok(planned) => planned,
             Err(err) => {
@@ -404,6 +446,7 @@ impl AlignerWindow {
 impl eframe::App for AlignerWindow {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.set_zoom_factor(self.ui_scale);
+        apply_style(ctx, self.paper);
         self.pump();
         if self.running() {
             ctx.request_repaint_after(Duration::from_millis(100));
@@ -433,6 +476,7 @@ impl eframe::App for AlignerWindow {
                         self.queue_ui(ui, busy);
                         ui.add_space(8.0);
                         card_frame(ui.style()).show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
                             ui.horizontal(|ui| {
                                 ui.strong("Options");
                                 tip_button(ui, "These choices apply to every row in the queue.");
@@ -509,6 +553,11 @@ impl AlignerWindow {
                     .clicked()
                 {
                     self.show_settings = !self.show_settings;
+                }
+                ui.add_space(4.0);
+                if theme_button(ui, self.paper).clicked() {
+                    self.paper = !self.paper;
+                    self.save_settings();
                 }
             });
         });
@@ -626,20 +675,22 @@ impl AlignerWindow {
                 _ => {}
             }
 
-            ui.add_space(6.0);
-            let save_emissions = self.mode != Mode::Align;
-            let emissions_tip = emissions_tip(self.mode);
-            let _ = path_row(
-                ui,
-                "Emissions",
-                &mut self.emissions,
-                busy,
-                "Emissions",
-                &[("Emissions", &["emissions"])],
-                save_emissions,
-                true,
-                Some(&emissions_tip),
-            );
+            if self.show_options || self.mode == Mode::Align {
+                ui.add_space(6.0);
+                let save_emissions = self.mode != Mode::Align;
+                let emissions_tip = emissions_tip(self.mode);
+                let _ = path_row(
+                    ui,
+                    "Emissions",
+                    &mut self.emissions,
+                    busy,
+                    "Emissions",
+                    &[("Emissions", &["emissions"])],
+                    save_emissions,
+                    true,
+                    Some(&emissions_tip),
+                );
+            }
         });
     }
 
@@ -690,6 +741,21 @@ impl AlignerWindow {
                     "Full run is the usual job. It decodes the audiobook and writes the aligned EPUB. Align reuses an emissions file that already exists. Emit only writes that file. Turning this off returns the window to Full run.",
                 );
             });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.add_enabled_ui(!busy, |ui| {
+                    if ui
+                        .checkbox(&mut self.show_options, "Show advanced options")
+                        .changed()
+                    {
+                        self.save_settings();
+                    }
+                });
+                tip_button(
+                    ui,
+                    "Shows the emissions path, sentence or word highlights, the pause gap, a limit on the audio, unplaced sentences, the report, the device, and the model. Off uses sentence highlights, a 3 second gap, the whole audiobook, and the usual device and model.",
+                );
+            });
         });
     }
 
@@ -697,9 +763,12 @@ impl AlignerWindow {
         let Ok(text) = std::fs::read_to_string(settings_path()) else {
             return;
         };
-        let (scale, advanced) = decode_settings(&text);
+        let (scale, advanced, options, paper, download) = decode_settings(&text);
         self.ui_scale = scale;
         self.show_advanced = advanced;
+        self.show_options = options;
+        self.paper = paper;
+        self.download = download;
     }
 
     fn save_settings(&self) {
@@ -707,69 +776,121 @@ impl AlignerWindow {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(path, encode_settings(self.ui_scale, self.show_advanced));
+        let _ = std::fs::write(
+            path,
+            encode_settings(
+                self.ui_scale,
+                self.show_advanced,
+                self.show_options,
+                self.paper,
+                self.download,
+            ),
+        );
     }
 
     fn options(&mut self, ui: &mut egui::Ui, busy: bool) {
         ui.add_enabled_ui(!busy, |ui| {
             if self.mode != Mode::Emit {
+                if self.show_options {
+                    ui.horizontal(|ui| {
+                        ui.label("Granularity");
+                        ui.selectable_value(&mut self.granularity_words, false, "Sentence");
+                        ui.selectable_value(&mut self.granularity_words, true, "Word");
+                        tip_button(
+                            ui,
+                            "Sentence is the usual highlight. Word highlights each word inside the sentence.",
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        gap_field(ui, &mut self.gap_seconds);
+                        ui.add_space(18.0);
+                        max_field(ui, &mut self.max_seconds);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.drop_unread, "Drop unplaced sentences");
+                        tip_button(
+                            ui,
+                            "Leave sentences the aligner could not place out of the overlay. Off keeps them in, timed between their neighbors.",
+                        );
+                    });
+                }
                 ui.horizontal(|ui| {
-                    ui.label("Granularity");
-                    ui.selectable_value(&mut self.granularity_words, false, "Sentence");
-                    ui.selectable_value(&mut self.granularity_words, true, "Word");
+                    ui.label("Split");
+                    egui::ComboBox::from_id_salt("audio-split")
+                        .selected_text(self.split_mode.label())
+                        .width(132.0)
+                        .show_ui(ui, |ui| {
+                            for mode in [
+                                SplitMode::Off,
+                                SplitMode::Chapter,
+                                SplitMode::Duration,
+                                SplitMode::Parts,
+                            ] {
+                                ui.selectable_value(&mut self.split_mode, mode, mode.label());
+                            }
+                        });
+                    if self.split_mode == SplitMode::Duration || self.split_mode == SplitMode::Parts {
+                        let hint = if self.split_mode == SplitMode::Duration {
+                            "seconds"
+                        } else {
+                            "count"
+                        };
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.split_value)
+                                .desired_width(120.0)
+                                .hint_text(hint),
+                        );
+                    }
                     tip_button(
                         ui,
-                        "Sentence is the usual highlight. Word highlights each word inside the sentence.",
+                        "Chapter writes one audio file per aligned chapter. Older read-aloud and EPUB 3 players follow the highlight more reliably that way, which is how the early audio-ebooks were built. One long file often seeks or highlights poorly in those apps. Off keeps the whole audiobook in one file. Duration writes files of at most that many seconds, and the last file is the remainder. Equal parts divides the audiobook into that many files of the same length. A sentence that crosses a cut stays in the file where it starts. The audio is copied, not re-encoded.",
                     );
                 });
-                ui.horizontal(|ui| {
-                    gap_field(ui, &mut self.gap_seconds);
-                    ui.add_space(18.0);
-                    max_field(ui, &mut self.max_seconds);
-                });
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.drop_unread, "Drop unplaced sentences");
-                    tip_button(
+                if self.show_options {
+                    let _ = path_row(
                         ui,
-                        "Leave sentences the aligner could not place out of the overlay. Off keeps them in, timed between their neighbors.",
+                        "Report",
+                        &mut self.reports,
+                        false,
+                        "JSON report",
+                        &[("JSON", &["json"])],
+                        true,
+                        true,
+                        Some("Optional JSON report. One book writes a file. A queue needs a folder, with one JSON per audiobook."),
                     );
-                });
-                let _ = path_row(
-                    ui,
-                    "Report",
-                    &mut self.reports,
-                    false,
-                    "JSON report",
-                    &[("JSON", &["json"])],
-                    true,
-                    true,
-                    Some("Optional JSON report. One book writes a file. A queue needs a folder, with one JSON per audiobook."),
-                );
+                }
             }
             if self.mode != Mode::Align {
-                ui.horizontal(|ui| {
-                    ui.label("Device");
-                    ui.selectable_value(&mut self.device, DeviceChoice::Auto, "Auto");
-                    ui.selectable_value(&mut self.device, DeviceChoice::Cuda, "CUDA");
-                    ui.selectable_value(&mut self.device, DeviceChoice::Cpu, "CPU");
-                    tip_button(
+                if self.show_options {
+                    ui.horizontal(|ui| {
+                        ui.label("Device");
+                        ui.selectable_value(&mut self.device, DeviceChoice::Auto, "Auto");
+                        ui.selectable_value(&mut self.device, DeviceChoice::Cuda, "CUDA");
+                        ui.selectable_value(&mut self.device, DeviceChoice::Cpu, "CPU");
+                        tip_button(
+                            ui,
+                            "Auto uses CUDA when the runtime can load it, and CPU otherwise. CUDA and CPU force that device.",
+                        );
+                    });
+                    let _ = path_row(
                         ui,
-                        "Auto uses CUDA when the runtime can load it, and CPU otherwise. CUDA and CPU force that device.",
+                        "Model",
+                        &mut self.model,
+                        false,
+                        "ONNX model",
+                        &[("ONNX", &["onnx"])],
+                        false,
+                        false,
+                        Some("Optional ONNX file. Empty uses a cached MMS-300M model, or models/mms-fp16.onnx."),
                     );
-                });
-                let _ = path_row(
-                    ui,
-                    "Model",
-                    &mut self.model,
-                    false,
-                    "ONNX model",
-                    &[("ONNX", &["onnx"])],
-                    false,
-                    false,
-                    Some("Optional ONNX file. Empty uses a cached MMS-300M model, or models/mms-fp16.onnx."),
-                );
+                }
                 ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.download, "Download the model if it is missing");
+                    if ui
+                        .checkbox(&mut self.download, "Download the model if it is missing")
+                        .changed()
+                    {
+                        self.save_settings();
+                    }
                     tip_button(
                         ui,
                         "Downloads the MMS-300M fp16 ONNX weights when the model file is missing. The weights are CC-BY-NC 4.0.",
@@ -826,7 +947,12 @@ fn card_frame(style: &egui::Style) -> egui::Frame {
     egui::Frame::group(style).inner_margin(egui::Margin::same(14))
 }
 
-fn apply_style(ctx: &egui::Context) {
+fn apply_style(ctx: &egui::Context, paper: bool) {
+    ctx.set_visuals(if paper {
+        egui::Visuals::light()
+    } else {
+        egui::Visuals::dark()
+    });
     ctx.all_styles_mut(|style| {
         style.text_styles.insert(
             egui::TextStyle::Small,
@@ -890,24 +1016,84 @@ fn max_field(ui: &mut egui::Ui, max_seconds: &mut String) {
 }
 
 fn settings_path() -> PathBuf {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("starlign").join("ui.txt")
+    config_dir().join("starlign").join("ui.txt")
 }
 
-fn encode_settings(scale: f32, advanced: bool) -> String {
+fn config_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(appdata) = std::env::var_os("APPDATA").filter(|value| !value.is_empty()) {
+            return PathBuf::from(appdata);
+        }
+        if let Some(profile) = std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()) {
+            return PathBuf::from(profile).join("AppData").join("Roaming");
+        }
+        return std::env::temp_dir();
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .unwrap_or_else(std::env::temp_dir)
+    }
+}
+
+/// Half black, half white. Click switches the dark theme and the paper theme.
+fn theme_button(ui: &mut egui::Ui, paper: bool) -> egui::Response {
+    let size = 22.0;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        paint_theme_icon(ui.painter(), rect);
+    }
+    let tip = if paper { "Dark theme" } else { "Paper theme" };
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(tip)
+}
+
+fn paint_theme_icon(painter: &egui::Painter, rect: egui::Rect) {
+    let center = rect.center();
+    let radius = rect.width() * 0.42;
+    let circle = egui::Rect::from_center_size(center, egui::vec2(radius * 2.0, radius * 2.0));
+    let left = egui::Rect::from_min_max(circle.min, egui::pos2(center.x, circle.max.y));
+    let right = egui::Rect::from_min_max(egui::pos2(center.x, circle.min.y), circle.max);
+    painter
+        .with_clip_rect(left)
+        .circle_filled(center, radius, egui::Color32::BLACK);
+    painter
+        .with_clip_rect(right)
+        .circle_filled(center, radius, egui::Color32::WHITE);
+    painter.circle_stroke(
+        center,
+        radius,
+        egui::Stroke::new(1.4, egui::Color32::from_gray(128)),
+    );
+}
+
+fn encode_settings(
+    scale: f32,
+    advanced: bool,
+    options: bool,
+    paper: bool,
+    download: bool,
+) -> String {
     format!(
-        "ui_scale {scale:.2}\nshow_advanced {}\n",
-        if advanced { "true" } else { "false" }
+        "ui_scale {scale:.2}\nshow_advanced {}\nshow_options {}\ntheme {}\ndownload {}\n",
+        if advanced { "true" } else { "false" },
+        if options { "true" } else { "false" },
+        if paper { "paper" } else { "dark" },
+        if download { "true" } else { "false" },
     )
 }
 
-fn decode_settings(text: &str) -> (f32, bool) {
+fn decode_settings(text: &str) -> (f32, bool, bool, bool, bool) {
     let mut scale = 1.0;
     let mut advanced = false;
+    let mut options = false;
+    let mut paper = false;
+    let mut download = true;
     for line in text.lines() {
         let mut parts = line.split_whitespace();
         match (parts.next(), parts.next()) {
@@ -918,10 +1104,16 @@ fn decode_settings(text: &str) -> (f32, bool) {
             }
             (Some("show_advanced"), Some("true")) => advanced = true,
             (Some("show_advanced"), Some("false")) => advanced = false,
+            (Some("show_options"), Some("true")) => options = true,
+            (Some("show_options"), Some("false")) => options = false,
+            (Some("theme"), Some("paper")) => paper = true,
+            (Some("theme"), Some("dark")) => paper = false,
+            (Some("download"), Some("true")) => download = true,
+            (Some("download"), Some("false")) => download = false,
             _ => {}
         }
     }
-    (scale, advanced)
+    (scale, advanced, options, paper, download)
 }
 
 fn emissions_tip(mode: Mode) -> String {
@@ -995,6 +1187,8 @@ fn plan_queue(
     model: &str,
     download: bool,
     drop_unread: bool,
+    split_mode: SplitMode,
+    split_value: &str,
     reports: &str,
 ) -> Result<Vec<Planned>, String> {
     let rows: Vec<(usize, &PairRow)> = pairs
@@ -1102,6 +1296,8 @@ fn plan_queue(
                 gap,
                 max.as_deref(),
                 drop_unread,
+                split_mode,
+                split_value,
                 report.as_deref(),
             )?;
             if mode == Mode::Run && download {
@@ -1238,6 +1434,8 @@ fn push_align_flags(
     gap: f64,
     max: Option<&str>,
     drop_unread: bool,
+    split_mode: SplitMode,
+    split_value: &str,
     reports: Option<&Path>,
 ) -> Result<(), String> {
     args.push("--granularity".into());
@@ -1258,10 +1456,45 @@ fn push_align_flags(
     if drop_unread {
         args.push("--drop-unread".into());
     }
+    push_split(args, split_mode, split_value)?;
     if let Some(path) = reports {
         push_pair(args, "--reports", path);
     }
     Ok(())
+}
+
+fn push_split(args: &mut Vec<String>, mode: SplitMode, value: &str) -> Result<(), String> {
+    match mode {
+        SplitMode::Off => Ok(()),
+        SplitMode::Chapter => {
+            args.push("--split-chapters".into());
+            Ok(())
+        }
+        SplitMode::Duration => {
+            let text = value.trim();
+            let seconds: f64 = text
+                .parse()
+                .map_err(|_| "Split duration must be a number of seconds.".to_string())?;
+            if !(seconds.is_finite() && seconds > 0.0) {
+                return Err("Split duration must be greater than 0 seconds.".into());
+            }
+            args.push("--split-seconds".into());
+            args.push(text.to_string());
+            Ok(())
+        }
+        SplitMode::Parts => {
+            let text = value.trim();
+            let count: u32 = text
+                .parse()
+                .map_err(|_| "Equal parts must be a whole number.".to_string())?;
+            if count < 2 {
+                return Err("Equal parts must be at least 2.".into());
+            }
+            args.push("--split-parts".into());
+            args.push(text.to_string());
+            Ok(())
+        }
+    }
 }
 
 fn push_model(args: &mut Vec<String>, model: &str) {
@@ -1459,14 +1692,24 @@ mod tests {
 
     #[test]
     fn settings_round_trip_and_ignore_unknown_lines() {
-        let text = encode_settings(1.25, true);
-        assert_eq!(decode_settings(&text), (1.25, true));
+        let text = encode_settings(1.25, true, false, true, false);
+        assert_eq!(decode_settings(&text), (1.25, true, false, true, false));
+        assert!(text.contains("show_options false"), "{text}");
+        assert!(text.contains("theme paper"), "{text}");
+        assert!(text.contains("download false"), "{text}");
         assert_eq!(
             decode_settings("ui_scale 3\nshow_advanced false\nextra noise\n"),
-            (1.75, false)
+            (1.75, false, false, false, true)
         );
-        assert_eq!(decode_settings("ui_scale 0.1\n"), (0.75, false));
-        assert_eq!(decode_settings(""), (1.0, false));
+        assert_eq!(
+            decode_settings("ui_scale 0.1\n"),
+            (0.75, false, false, false, true)
+        );
+        assert_eq!(decode_settings(""), (1.0, false, false, false, true));
+        assert_eq!(
+            decode_settings("show_options true\nui_scale 1.00\ntheme dark\ndownload false\n"),
+            (1.0, false, true, false, false)
+        );
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -1502,8 +1745,18 @@ mod tests {
             "",
             false,
             false,
+            SplitMode::Off,
+            "",
             "",
         )
+    }
+
+    #[test]
+    fn chapter_split_is_the_window_default() {
+        let window = AlignerWindow::default();
+        assert!(window.split_mode == SplitMode::Chapter);
+        assert!(window.download);
+        assert!(!window.paper);
     }
 
     #[test]
@@ -1537,7 +1790,98 @@ mod tests {
         );
         assert!(args.contains("--granularity sentence"));
         assert!(args.contains("--gap-seconds 3"));
+        assert!(!args.contains("--split-chapters"), "{args}");
+        assert!(!args.contains("--split-seconds"), "{args}");
+        assert!(!args.contains("--split-parts"), "{args}");
         assert!(!args.contains("--download"), "{args}");
+        let split = plan_queue(
+            Mode::Run,
+            &[pair(&audio, &epub)],
+            "",
+            false,
+            "3",
+            "",
+            DeviceChoice::Auto,
+            "",
+            false,
+            false,
+            SplitMode::Chapter,
+            "",
+            "",
+        )
+        .unwrap();
+        assert!(split[0].args.iter().any(|arg| arg == "--split-chapters"));
+        let seconds = plan_queue(
+            Mode::Align,
+            &[pair(&audio, &epub)],
+            emissions.to_str().unwrap(),
+            false,
+            "3",
+            "",
+            DeviceChoice::Auto,
+            "",
+            false,
+            false,
+            SplitMode::Duration,
+            "600",
+            "",
+        )
+        .unwrap();
+        let seconds_args = seconds[0].args.join(" ");
+        assert!(
+            seconds_args.contains("--split-seconds 600"),
+            "{seconds_args}"
+        );
+        assert!(!seconds_args.contains("--split-chapters"), "{seconds_args}");
+        let parts = plan_queue(
+            Mode::Align,
+            &[pair(&audio, &epub)],
+            emissions.to_str().unwrap(),
+            false,
+            "3",
+            "",
+            DeviceChoice::Auto,
+            "",
+            false,
+            false,
+            SplitMode::Parts,
+            "8",
+            "",
+        )
+        .unwrap();
+        assert!(parts[0].args.join(" ").contains("--split-parts 8"));
+        assert!(plan_queue(
+            Mode::Align,
+            &[pair(&audio, &epub)],
+            emissions.to_str().unwrap(),
+            false,
+            "3",
+            "",
+            DeviceChoice::Auto,
+            "",
+            false,
+            false,
+            SplitMode::Duration,
+            "",
+            "",
+        )
+        .is_err());
+        assert!(plan_queue(
+            Mode::Align,
+            &[pair(&audio, &epub)],
+            emissions.to_str().unwrap(),
+            false,
+            "3",
+            "",
+            DeviceChoice::Auto,
+            "",
+            false,
+            false,
+            SplitMode::Parts,
+            "1",
+            "",
+        )
+        .is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

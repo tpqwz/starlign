@@ -22,6 +22,7 @@ pub mod epub;
 pub mod exclude;
 pub mod pipeline;
 pub mod runtime;
+pub mod split;
 pub mod xmltree;
 
 pub use pipeline::{align_book, emit_audio, run, Granularity, RunOptions};

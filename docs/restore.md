@@ -53,7 +53,7 @@ These are ignored. A restore leaves them on disk and cannot recreate them:
 | `stalign/target/` | Cargo output |
 | `stalign/dist/starlign` | Launch binary, about 17MB, over the 1MiB snapshot limit |
 | `stalign/dist/starlign-2026-10-24-0147` | Copy of the 01:47 binary, sha256 `b9790455a6354f871d4fbfcfb56a140ec8889bd1b14209552ee4fee6f3aa1935` |
-| `*.m4b`, `*.epub`, `emission/` | The audiobook, the source EPUB, both aligned EPUBs, and cached emissions |
+| `*.m4b`, `*.epub`, `emission/`, `*.emissions`, `*.emissions.tracks.json` | The audiobook, the source EPUB, the aligned EPUBs, and cached emissions |
 
 Do not delete those to "clean up" a restore. The reference book is `aligned.epub`. The full-book alignment from emissions is `/tmp/recovery-aligned.epub`. The GUI test wrote `Recovery—The Sacred Art (The Art of Spiritual Living)-aligned.epub`.
 

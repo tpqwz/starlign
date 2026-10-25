@@ -6,9 +6,9 @@
 
 use crate::audio::Track;
 use crate::xmltree::{local_name, Document, NodeData};
-use anyhow::{bail, Context, Result};
 use any_ascii::any_ascii;
-use std::collections::{BTreeMap, HashMap};
+use anyhow::{bail, Context, Result};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -115,7 +115,9 @@ impl Book {
             if local_name(doc.name(*child)) != "item" {
                 continue;
             }
-            let Some(id) = doc.attr(*child, "id") else { continue };
+            let Some(id) = doc.attr(*child, "id") else {
+                continue;
+            };
             items.insert(id, *child);
         }
         let opf_dir = parent_dir(&self.opf_path);
@@ -137,8 +139,12 @@ impl Book {
             if local_name(doc.name(*child)) != "itemref" {
                 continue;
             }
-            let Some(idref) = doc.attr(*child, "idref") else { continue };
-            let Some(&item) = items.get(&idref) else { continue };
+            let Some(idref) = doc.attr(*child, "idref") else {
+                continue;
+            };
+            let Some(&item) = items.get(&idref) else {
+                continue;
+            };
             let href = doc.attr(item, "href").unwrap_or_default();
             let media = doc.attr(item, "media-type").unwrap_or_default();
             let properties = doc.attr(item, "properties").unwrap_or_default();
@@ -152,12 +158,18 @@ impl Book {
                 continue;
             };
             let xml = String::from_utf8_lossy(bytes).into_owned();
-            let linear = doc.attr(*child, "linear").unwrap_or_default().to_ascii_lowercase() != "no";
+            let linear = doc
+                .attr(*child, "linear")
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                != "no";
             pending.push((idref.to_string(), href, zip_path, properties, xml, linear));
         }
         let spine_len = pending.len();
         let mut chapters = Vec::new();
-        for (index, (idref, href, zip_path, properties, xml, linear)) in pending.into_iter().enumerate() {
+        for (index, (idref, href, zip_path, properties, xml, linear)) in
+            pending.into_iter().enumerate()
+        {
             let key = href_key(&href);
             let nav = properties.split_whitespace().any(|token| token == "nav");
             let content_types = content_types_of(&xml);
@@ -180,7 +192,10 @@ impl Book {
             let skip_reason = crate::exclude::skip_reason(&facts).unwrap_or_default();
             let skip = !skip_reason.is_empty();
             chapters.push(SourceChapter {
-                id: items.get(idref.as_str()).and_then(|item| doc.attr(*item, "id")).unwrap_or(idref),
+                id: items
+                    .get(idref.as_str())
+                    .and_then(|item| doc.attr(*item, "id"))
+                    .unwrap_or(idref),
                 href,
                 zip_path,
                 properties,
@@ -198,6 +213,7 @@ impl Book {
         chapters: &[ChapterOutput],
         tracks: &[Track],
         total_seconds: f64,
+        split: crate::split::Split,
     ) -> Result<()> {
         if let Some(parent) = output.parent() {
             if !parent.as_os_str().is_empty() {
@@ -207,6 +223,23 @@ impl Book {
         let opf_dir = parent_dir(&self.opf_path);
         let mut replaced: HashMap<String, Vec<u8>> = HashMap::new();
         let mut smils: Vec<(String, String, f64)> = Vec::new();
+        let mut kept: Vec<crate::split::Piece> = Vec::new();
+        let mut cache = crate::split::Cache::new();
+        let mut used_audio = HashSet::new();
+        let timed = match split {
+            crate::split::Split::Seconds(_) | crate::split::Split::Parts(_) => {
+                Some(prepare_timed_split(
+                    &mut cache,
+                    tracks,
+                    chapters,
+                    split,
+                    &mut kept,
+                    &mut used_audio,
+                )?)
+            }
+            _ => None,
+        };
+        let mut chapter_tracks: Vec<Track> = Vec::new();
         for chapter in chapters {
             if chapter.spans.is_empty() {
                 continue;
@@ -217,20 +250,106 @@ impl Book {
             let smil_dir = parent_dir(&smil_zip);
             let text_rel = url_encode_path(&relative_from(&smil_dir, &chapter.zip_path));
             let duration = chapter_duration(&chapter.spans);
-            let smil = render_smil(&chapter.href, &text_rel, &chapter.spans, tracks, &smil_dir, &opf_dir);
+            let smil = if let Some(plan) = &timed {
+                let windows: Vec<std::ops::Range<usize>> = chapter
+                    .spans
+                    .iter()
+                    .map(|span| {
+                        let index = crate::split::slice_index(&plan.nominal, span.start);
+                        plan.ranges[index].clone()
+                    })
+                    .collect();
+                render_smil(
+                    &chapter.href,
+                    &text_rel,
+                    &chapter.spans,
+                    &plan.tracks,
+                    &smil_dir,
+                    &opf_dir,
+                    Some(&windows),
+                )
+            } else if split == crate::split::Split::Chapters {
+                let start = chapter
+                    .spans
+                    .iter()
+                    .map(|span| span.start)
+                    .fold(f64::INFINITY, f64::min);
+                let end = chapter
+                    .spans
+                    .iter()
+                    .map(|span| span.end)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let from = chapter_tracks.len();
+                let pieces = crate::split::cut_range(
+                    &mut cache,
+                    tracks,
+                    start,
+                    end,
+                    &audio_stem(&chapter.href),
+                    &mut used_audio,
+                )
+                .with_context(|| format!("splitting audio for {}", chapter.href))?;
+                if pieces.is_empty() {
+                    bail!(
+                        "no audiobook audio covers {start:.3}s–{end:.3}s for {}",
+                        chapter.href
+                    );
+                }
+                for piece in pieces {
+                    chapter_tracks.push(piece.track());
+                    kept.push(piece);
+                }
+                render_smil(
+                    &chapter.href,
+                    &text_rel,
+                    &chapter.spans,
+                    &chapter_tracks[from..],
+                    &smil_dir,
+                    &opf_dir,
+                    None,
+                )
+            } else {
+                render_smil(
+                    &chapter.href,
+                    &text_rel,
+                    &chapter.spans,
+                    tracks,
+                    &smil_dir,
+                    &opf_dir,
+                    None,
+                )
+            };
             smils.push((smil_zip, smil, duration));
         }
+        let manifest_ref: &[Track] = if let Some(plan) = &timed {
+            &plan.tracks
+        } else if split == crate::split::Split::Chapters {
+            &chapter_tracks
+        } else {
+            tracks
+        };
         let css_zip = join_path(&opf_dir, "Styles/storyteller-readaloud.css");
-        let opf_xml = rewrite_opf(&self, chapters, &smils, tracks, total_seconds)?;
+        let opf_xml = rewrite_opf(self, chapters, &smils, manifest_ref, total_seconds)?;
         replaced.insert(self.opf_path.clone(), opf_xml.into_bytes());
         replaced.insert(css_zip.clone(), READALOUD_CSS.as_bytes().to_vec());
 
-        let audio_paths: HashMap<String, &Track> = tracks
-            .iter()
-            .map(|track| (join_path(&opf_dir, &format!("Audio/{}", track.epub_name)), track))
-            .collect();
+        let copying_sources = split == crate::split::Split::Whole;
+        let audio_paths: HashMap<String, &Track> = if copying_sources {
+            tracks
+                .iter()
+                .map(|track| {
+                    (
+                        join_path(&opf_dir, &format!("Audio/{}", track.epub_name)),
+                        track,
+                    )
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        };
 
-        let file = File::create(output).with_context(|| format!("creating {}", output.display()))?;
+        let file =
+            File::create(output).with_context(|| format!("creating {}", output.display()))?;
         let mut zip = ZipWriter::new(file);
         let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
         let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
@@ -255,15 +374,374 @@ impl Book {
             zip.start_file(name, deflated)?;
             zip.write_all(xml.as_bytes())?;
         }
-        for (name, track) in &audio_paths {
-            zip.start_file(name, stored)?;
-            let mut audio = File::open(&track.source)
-                .with_context(|| format!("embedding {}", track.source.display()))?;
-            std::io::copy(&mut audio, &mut zip)?;
+        if copying_sources {
+            for (name, track) in &audio_paths {
+                zip.start_file(name, stored)?;
+                let mut audio = File::open(&track.source)
+                    .with_context(|| format!("embedding {}", track.source.display()))?;
+                std::io::copy(&mut audio, &mut zip)?;
+            }
+        } else {
+            for piece in &kept {
+                let name = join_path(&opf_dir, &format!("Audio/{}", piece.epub_name));
+                zip.start_file(name, stored)?;
+                let mut audio = File::open(piece.path())
+                    .with_context(|| format!("embedding {}", piece.epub_name))?;
+                std::io::copy(&mut audio, &mut zip)?;
+            }
         }
         zip.finish()?;
         Ok(())
     }
+}
+
+struct TimedSplit {
+    tracks: Vec<Track>,
+    ranges: Vec<std::ops::Range<usize>>,
+    nominal: Vec<(f64, f64)>,
+}
+
+fn prepare_timed_split(
+    cache: &mut crate::split::Cache,
+    tracks: &[Track],
+    chapters: &[ChapterOutput],
+    split: crate::split::Split,
+    kept: &mut Vec<crate::split::Piece>,
+    used: &mut HashSet<String>,
+) -> Result<TimedSplit> {
+    let (timeline_start, timeline_end) = timeline_bounds(tracks)?;
+    let nominal = crate::split::nominal_slices(split, timeline_start, timeline_end)?;
+    let span_times: Vec<(f64, f64)> = chapters
+        .iter()
+        .flat_map(|chapter| chapter.spans.iter().map(|span| (span.start, span.end)))
+        .collect();
+    let (covered, _) = crate::split::assign_slices(&nominal, &span_times);
+    let width = nominal.len().to_string().len().max(2);
+    let mut out_tracks = Vec::new();
+    let mut ranges = Vec::new();
+    for (index, (raw_start, raw_end)) in covered.iter().enumerate() {
+        let lo = (*raw_start).max(timeline_start);
+        let hi = (*raw_end).min(timeline_end);
+        let from = out_tracks.len();
+        if hi - lo <= 1e-4 {
+            ranges.push(from..from);
+            continue;
+        }
+        let stem = format!("audio-{n:0width$}", n = index + 1, width = width);
+        let pieces = crate::split::cut_range(cache, tracks, lo, hi, &stem, used)
+            .with_context(|| format!("splitting audio {stem} {lo:.3}s–{hi:.3}s"))?;
+        if pieces.is_empty() {
+            crate::say!("split {stem} {lo:.3}s–{hi:.3}s has no audio; skipping");
+            ranges.push(from..from);
+            continue;
+        }
+        for piece in pieces {
+            out_tracks.push(piece.track());
+            kept.push(piece);
+        }
+        ranges.push(from..out_tracks.len());
+    }
+    for &(span_start, span_end) in &span_times {
+        let index = crate::split::slice_index(&nominal, span_start);
+        if ranges
+            .get(index)
+            .map(|range| range.is_empty())
+            .unwrap_or(true)
+        {
+            bail!("no audiobook audio covers {span_start:.3}s–{span_end:.3}s");
+        }
+    }
+    Ok(TimedSplit {
+        tracks: out_tracks,
+        ranges,
+        nominal,
+    })
+}
+
+fn timeline_bounds(tracks: &[Track]) -> Result<(f64, f64)> {
+    if tracks.is_empty() {
+        bail!("the audiobook has no audio to split");
+    }
+    let start = tracks
+        .iter()
+        .map(|track| track.start_secs())
+        .fold(f64::INFINITY, f64::min);
+    let end = tracks
+        .iter()
+        .map(|track| track.start_secs() + track.duration_secs())
+        .fold(f64::NEG_INFINITY, f64::max);
+    if !(end > start) {
+        bail!("the audiobook has no duration to split");
+    }
+    Ok((start, end))
+}
+
+fn audio_stem(href: &str) -> String {
+    let base = href.rsplit('/').next().unwrap_or(href);
+    base.rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(base)
+        .to_string()
+}
+
+#[cfg(test)]
+#[test]
+fn split_chapters_shifts_clips_onto_a_chapter_file() {
+    let dir = std::env::temp_dir().join(format!("starlign-epub-split-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let audio = dir.join("book.m4a");
+    crate::split::write_marker_fixture(&audio);
+    let mut files = BTreeMap::new();
+    files.insert(
+        "content.opf".into(),
+        br#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
+<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+<dc:identifier id="uid">id</dc:identifier>
+<dc:title>T</dc:title>
+<dc:language>en</dc:language>
+</metadata>
+<manifest>
+<item id="c1" href="chapter.xhtml" media-type="application/xhtml+xml"/>
+</manifest>
+<spine>
+<itemref idref="c1"/>
+</spine>
+</package>"#
+            .to_vec(),
+    );
+    files.insert(
+        "chapter.xhtml".into(),
+        b"<?xml version=\"1.0\"?><html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>c</title></head><body><p>Hello.</p></body></html>".to_vec(),
+    );
+    let book = Book {
+        opf_path: "content.opf".into(),
+        files,
+    };
+    let output = dir.join("out.epub");
+    let chapters = vec![ChapterOutput {
+        href: "chapter.xhtml".into(),
+        zip_path: "chapter.xhtml".into(),
+        xhtml: "<html xmlns=\"http://www.w3.org/1999/xhtml\"></html>".into(),
+        spans: vec![OverlaySpan {
+            id: "chapter.xhtml-s0".into(),
+            start: 1.25,
+            end: 2.10,
+            kind: SpanKind::Matched,
+        }],
+    }];
+    let tracks = vec![Track {
+        source: audio,
+        epub_name: "whole.m4a".into(),
+        media_type: "audio/mp4".into(),
+        start_sample: 0,
+        samples: 4 * 16_000,
+    }];
+    book.write(
+        &output,
+        &chapters,
+        &tracks,
+        4.0,
+        crate::split::Split::Chapters,
+    )
+    .unwrap();
+    let mut archive = ZipArchive::new(File::open(&output).unwrap()).unwrap();
+    let mut smil = String::new();
+    archive
+        .by_name("MediaOverlays/chapter.smil")
+        .unwrap()
+        .read_to_string(&mut smil)
+        .unwrap();
+    assert!(smil.contains("clipBegin=\"0:00:00.250\""), "{smil}");
+    assert!(smil.contains("clipEnd=\"0:00:01.100\""), "{smil}");
+    assert!(smil.contains("../Audio/chapter.m4a"), "{smil}");
+    assert!(!smil.contains("whole.m4a"), "{smil}");
+    let mut audio_bytes = Vec::new();
+    archive
+        .by_name("Audio/chapter.m4a")
+        .unwrap()
+        .read_to_end(&mut audio_bytes)
+        .unwrap();
+    assert!(
+        audio_bytes.windows(8).any(|window| window == [0xB2; 8]),
+        "missing kept frame"
+    );
+    assert!(
+        !audio_bytes.windows(8).any(|window| window == [0xA1; 8]),
+        "kept audio from before the chapter"
+    );
+    assert!(
+        !audio_bytes.windows(8).any(|window| window == [0xD4; 8]),
+        "kept audio from after the chapter"
+    );
+    let mut opf = String::new();
+    archive
+        .by_name("content.opf")
+        .unwrap()
+        .read_to_string(&mut opf)
+        .unwrap();
+    assert!(opf.contains("Audio/chapter.m4a"), "{opf}");
+    assert!(opf.contains("media-overlay"), "{opf}");
+    let whole = dir.join("whole.epub");
+    book.write(&whole, &chapters, &tracks, 4.0, crate::split::Split::Whole)
+        .unwrap();
+    let mut archive = ZipArchive::new(File::open(&whole).unwrap()).unwrap();
+    let mut smil = String::new();
+    archive
+        .by_name("MediaOverlays/chapter.smil")
+        .unwrap()
+        .read_to_string(&mut smil)
+        .unwrap();
+    assert!(smil.contains("clipBegin=\"0:00:01.250\""), "{smil}");
+    assert!(smil.contains("../Audio/whole.m4a"), "{smil}");
+    assert!(archive.by_name("Audio/chapter.m4a").is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(test)]
+#[test]
+fn a_duration_split_keeps_a_crossing_span_on_the_file_where_it_starts() {
+    let dir = std::env::temp_dir().join(format!("starlign-epub-duration-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let audio = dir.join("book.m4a");
+    crate::split::write_marker_fixture(&audio);
+    let mut files = BTreeMap::new();
+    files.insert(
+        "content.opf".into(),
+        br#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
+<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+<dc:identifier id="uid">id</dc:identifier>
+<dc:title>T</dc:title>
+<dc:language>en</dc:language>
+</metadata>
+<manifest>
+<item id="c1" href="chapter.xhtml" media-type="application/xhtml+xml"/>
+</manifest>
+<spine>
+<itemref idref="c1"/>
+</spine>
+</package>"#
+            .to_vec(),
+    );
+    files.insert(
+        "chapter.xhtml".into(),
+        b"<?xml version=\"1.0\"?><html xmlns=\"http://www.w3.org/1999/xhtml\"><body><p>Hello.</p></body></html>".to_vec(),
+    );
+    let book = Book {
+        opf_path: "content.opf".into(),
+        files,
+    };
+    let chapters = vec![ChapterOutput {
+        href: "chapter.xhtml".into(),
+        zip_path: "chapter.xhtml".into(),
+        xhtml: "<html xmlns=\"http://www.w3.org/1999/xhtml\"></html>".into(),
+        spans: vec![
+            OverlaySpan {
+                id: "chapter.xhtml-s0".into(),
+                start: 1.25,
+                end: 2.10,
+                kind: SpanKind::Matched,
+            },
+            OverlaySpan {
+                id: "chapter.xhtml-s1".into(),
+                start: 2.20,
+                end: 3.40,
+                kind: SpanKind::Matched,
+            },
+        ],
+    }];
+    let tracks = vec![Track {
+        source: audio,
+        epub_name: "whole.m4a".into(),
+        media_type: "audio/mp4".into(),
+        start_sample: 0,
+        samples: 4 * 16_000,
+    }];
+    for (split, name) in [
+        (crate::split::Split::Seconds(2.0), "seconds.epub"),
+        (crate::split::Split::Parts(2), "parts.epub"),
+    ] {
+        let output = dir.join(name);
+        book.write(&output, &chapters, &tracks, 4.0, split).unwrap();
+        let mut archive = ZipArchive::new(File::open(&output).unwrap()).unwrap();
+        let mut smil = String::new();
+        archive
+            .by_name("MediaOverlays/chapter.smil")
+            .unwrap()
+            .read_to_string(&mut smil)
+            .unwrap();
+        assert_eq!(smil.matches("<par ").count(), 2, "{name} {smil}");
+        let first = par_text(&smil, "chapter.xhtml-s0-0");
+        assert!(
+            first.contains("clipBegin=\"0:00:01.250\""),
+            "{name} {first}"
+        );
+        assert!(first.contains("clipEnd=\"0:00:02.100\""), "{name} {first}");
+        assert!(first.contains("../Audio/audio-01.m4a"), "{name} {first}");
+        assert!(!first.contains("audio-02"), "{name} {first}");
+        let second = par_text(&smil, "chapter.xhtml-s1-1");
+        assert!(
+            second.contains("clipBegin=\"0:00:00.200\""),
+            "{name} {second}"
+        );
+        assert!(
+            second.contains("clipEnd=\"0:00:01.400\""),
+            "{name} {second}"
+        );
+        assert!(second.contains("../Audio/audio-02.m4a"), "{name} {second}");
+        assert!(!second.contains("audio-01"), "{name} {second}");
+        let mut early = Vec::new();
+        archive
+            .by_name("Audio/audio-01.m4a")
+            .unwrap()
+            .read_to_end(&mut early)
+            .unwrap();
+        assert!(early.windows(8).any(|window| window == [0xA1; 8]), "{name}");
+        assert!(early.windows(8).any(|window| window == [0xC3; 8]), "{name}");
+        assert!(
+            !early.windows(8).any(|window| window == [0xD4; 8]),
+            "{name}"
+        );
+        let mut later = Vec::new();
+        archive
+            .by_name("Audio/audio-02.m4a")
+            .unwrap()
+            .read_to_end(&mut later)
+            .unwrap();
+        assert!(later.windows(8).any(|window| window == [0xC3; 8]), "{name}");
+        assert!(later.windows(8).any(|window| window == [0xD4; 8]), "{name}");
+        assert!(
+            !later.windows(8).any(|window| window == [0xA1; 8]),
+            "{name}"
+        );
+        assert!(
+            !later.windows(8).any(|window| window == [0xB2; 8]),
+            "{name}"
+        );
+        let mut opf = String::new();
+        archive
+            .by_name("content.opf")
+            .unwrap()
+            .read_to_string(&mut opf)
+            .unwrap();
+        assert!(opf.contains("Audio/audio-01.m4a"), "{name} {opf}");
+        assert!(opf.contains("Audio/audio-02.m4a"), "{name} {opf}");
+        assert!(!opf.contains("whole.m4a"), "{name} {opf}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(test)]
+fn par_text<'a>(smil: &'a str, id: &str) -> &'a str {
+    let key = format!("id=\"{id}\"");
+    let start = smil
+        .find(&key)
+        .unwrap_or_else(|| panic!("missing {id} in {smil}"));
+    let end = smil[start..].find("</par>").expect("par") + start;
+    &smil[start..end]
 }
 
 pub fn markup_xml(xml: &str, id_prefix: &str, word_level: bool) -> Result<(String, ChapterText)> {
@@ -317,7 +795,8 @@ pub fn push_letters(text: &str, out: &mut String) {
             }
             '0'..='9' => {
                 let mut number = String::new();
-                while index < chars.len() && (chars[index].is_ascii_digit() || chars[index] == ',') {
+                while index < chars.len() && (chars[index].is_ascii_digit() || chars[index] == ',')
+                {
                     if chars[index] != ',' {
                         number.push(chars[index]);
                     } else if index + 1 < chars.len() && chars[index + 1].is_ascii_digit() {
@@ -328,7 +807,11 @@ pub fn push_letters(text: &str, out: &mut String) {
                     index += 1;
                 }
                 let mut fraction = String::new();
-                if index < chars.len() && chars[index] == '.' && index + 1 < chars.len() && chars[index + 1].is_ascii_digit() {
+                if index < chars.len()
+                    && chars[index] == '.'
+                    && index + 1 < chars.len()
+                    && chars[index + 1].is_ascii_digit()
+                {
                     index += 1;
                     while index < chars.len() && chars[index].is_ascii_digit() {
                         fraction.push(chars[index]);
@@ -392,10 +875,30 @@ fn spell_cardinal(value: u64) -> String {
 
 fn spell_below_thousand(value: u32) -> String {
     const ONES: [&str; 20] = [
-        "", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve",
-        "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen",
+        "",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
     ];
-    const TENS: [&str; 10] = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
+    const TENS: [&str; 10] = [
+        "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+    ];
     let mut parts = Vec::new();
     let mut rest = value;
     if rest >= 100 {
@@ -478,7 +981,8 @@ fn sentence_ranges(flat: &str) -> Vec<(usize, usize)> {
     while index < ranges.len() {
         let start = ranges[index].0;
         let mut end = ranges[index].1;
-        while index + 1 < ranges.len() && is_spoken_prefix(&flat[ranges[index].0..ranges[index].1]) {
+        while index + 1 < ranges.len() && is_spoken_prefix(&flat[ranges[index].0..ranges[index].1])
+        {
             index += 1;
             end = ranges[index].1;
         }
@@ -504,7 +1008,10 @@ fn is_spoken_prefix(sentence: &str) -> bool {
         return (1..=31).contains(&number);
     }
     let chars: Vec<char> = trimmed.chars().collect();
-    if chars.len() >= 2 && chars[chars.len() - 1] == '.' && chars[chars.len() - 2].is_ascii_uppercase() {
+    if chars.len() >= 2
+        && chars[chars.len() - 1] == '.'
+        && chars[chars.len() - 2].is_ascii_uppercase()
+    {
         return chars.len() == 2 || chars[chars.len() - 3].is_whitespace();
     }
     false
@@ -515,10 +1022,16 @@ fn sentence_has_words(text: &str) -> bool {
 }
 
 fn sentence_index(ranges: &[(usize, usize)], pos: usize) -> Option<usize> {
-    ranges.iter().position(|(start, end)| pos >= *start && pos < *end)
+    ranges
+        .iter()
+        .position(|(start, end)| pos >= *start && pos < *end)
 }
 
-fn cut_piece(flat: &str, piece: &Piece, label_at: impl Fn(usize) -> Option<usize>) -> Vec<(usize, usize, Option<usize>)> {
+fn cut_piece(
+    flat: &str,
+    piece: &Piece,
+    label_at: impl Fn(usize) -> Option<usize>,
+) -> Vec<(usize, usize, Option<usize>)> {
     let mut out = Vec::new();
     if piece.flat_end <= piece.flat_start {
         return out;
@@ -549,8 +1062,17 @@ fn next_boundary(text: &str, pos: usize) -> usize {
     next
 }
 
-fn apply_segments(doc: &mut Document, segs: &HashMap<usize, Vec<(usize, usize, Option<usize>)>>, attr: &str) {
-    fn rewrite(doc: &mut Document, idx: usize, segs: &HashMap<usize, Vec<(usize, usize, Option<usize>)>>, attr: &str) {
+fn apply_segments(
+    doc: &mut Document,
+    segs: &HashMap<usize, Vec<(usize, usize, Option<usize>)>>,
+    attr: &str,
+) {
+    fn rewrite(
+        doc: &mut Document,
+        idx: usize,
+        segs: &HashMap<usize, Vec<(usize, usize, Option<usize>)>>,
+        attr: &str,
+    ) {
         let children = doc.children(idx).to_vec();
         let mut new_children = Vec::new();
         for child in children {
@@ -568,7 +1090,8 @@ fn apply_segments(doc: &mut Document, segs: &HashMap<usize, Vec<(usize, usize, O
                         continue;
                     }
                     if let Some(label) = label {
-                        let span = doc.create_element("span", vec![(attr.to_string(), label.to_string())]);
+                        let span =
+                            doc.create_element("span", vec![(attr.to_string(), label.to_string())]);
                         let text_node = doc.create_text(slice);
                         doc.set_children(span, vec![text_node]);
                         new_children.push(span);
@@ -659,7 +1182,10 @@ fn regroup(doc: &mut Document, idx: usize, attr: &str) {
     if children.is_empty() {
         return;
     }
-    let owns: Vec<Own> = children.iter().map(|child| ownership(doc, *child, attr)).collect();
+    let owns: Vec<Own> = children
+        .iter()
+        .map(|child| ownership(doc, *child, attr))
+        .collect();
     let mut runs: Vec<(Option<usize>, Vec<usize>)> = Vec::new();
     let mut pending: Vec<usize> = Vec::new();
     for (child, own) in children.iter().zip(owns) {
@@ -704,14 +1230,15 @@ fn regroup(doc: &mut Document, idx: usize, attr: &str) {
         let marker = sent.to_string();
         // A block already holds its own sentence spans. Wrapping the block in
         // another span nests the same sentence and counts its letters twice.
-        let wraps_block = nodes.iter().any(|node| {
-            doc.is_element(*node) && is_block(&local_name(doc.name(*node)))
-        });
+        let wraps_block = nodes
+            .iter()
+            .any(|node| doc.is_element(*node) && is_block(&local_name(doc.name(*node))));
         if wraps_block {
             new_children.extend(nodes);
             continue;
         }
-        let single = nodes.len() == 1 && doc.attr(nodes[0], attr).as_deref() == Some(marker.as_str());
+        let single =
+            nodes.len() == 1 && doc.attr(nodes[0], attr).as_deref() == Some(marker.as_str());
         if single {
             new_children.push(nodes[0]);
             continue;
@@ -746,7 +1273,9 @@ fn lift_inline(doc: &mut Document, idx: usize, attr: &str) {
     }
     if spans.len() == 1 && non_neutral == 1 {
         let span = spans[0];
-        let Some(sent) = doc.attr(span, attr) else { return };
+        let Some(sent) = doc.attr(span, attr) else {
+            return;
+        };
         let inner = doc.take_children(span);
         let mut rebuilt = Vec::new();
         for child in children {
@@ -761,7 +1290,12 @@ fn lift_inline(doc: &mut Document, idx: usize, attr: &str) {
     }
 }
 
-fn assign_sentence_ids(doc: &mut Document, idx: usize, prefix: &str, counts: &mut HashMap<usize, usize>) {
+fn assign_sentence_ids(
+    doc: &mut Document,
+    idx: usize,
+    prefix: &str,
+    counts: &mut HashMap<usize, usize>,
+) {
     if doc.is_element(idx) {
         if let Some(value) = doc.attr(idx, "data-st-sent") {
             if let Ok(sent) = value.parse::<usize>() {
@@ -823,7 +1357,10 @@ fn wrap_words(doc: &mut Document, span: usize, counts: &mut HashMap<String, usiz
     let mut segs = HashMap::new();
     for piece in &pieces {
         let cuts = cut_piece(&flat, piece, |pos| {
-            ranges.iter().find(|(start, end, _)| pos >= *start && pos < *end).map(|(_, _, index)| *index)
+            ranges
+                .iter()
+                .find(|(start, end, _)| pos >= *start && pos < *end)
+                .map(|(_, _, index)| *index)
         });
         segs.insert(piece.node, cuts);
     }
@@ -888,7 +1425,8 @@ fn apply_segments_under(
                         continue;
                     }
                     if let Some(label) = label {
-                        let span = doc.create_element("span", vec![(attr.to_string(), label.to_string())]);
+                        let span =
+                            doc.create_element("span", vec![(attr.to_string(), label.to_string())]);
                         let text_node = doc.create_text(slice);
                         doc.set_children(span, vec![text_node]);
                         new_children.push(span);
@@ -986,7 +1524,8 @@ fn visible_text(doc: &Document, idx: usize) -> String {
             NodeData::Text(text) => out.push_str(text),
             NodeData::Comment(_) => {}
             NodeData::Element { .. } => {
-                if should_skip(doc, idx) && doc.attr(idx, "epub:type").as_deref() != Some("storyteller:sentence-span")
+                if should_skip(doc, idx)
+                    && doc.attr(idx, "epub:type").as_deref() != Some("storyteller:sentence-span")
                 {
                     return;
                 }
@@ -1008,7 +1547,10 @@ fn should_skip(doc: &Document, idx: usize) -> bool {
     if let Some(kind) = doc.attr(idx, "epub:type") {
         let kind = kind.to_ascii_lowercase();
         if kind.split_whitespace().any(|token| {
-            matches!(token, "noteref" | "footnote" | "rearnote" | "pagebreak" | "endnote")
+            matches!(
+                token,
+                "noteref" | "footnote" | "rearnote" | "pagebreak" | "endnote"
+            )
         }) {
             return true;
         }
@@ -1127,8 +1669,13 @@ fn rewrite_opf(
         if chapter.spans.is_empty() {
             continue;
         }
-        let Some(item) = find_item(&doc, manifest, &chapter.href) else { continue };
-        let overlay_id = format!("{}_overlay", doc.attr(item, "id").unwrap_or_else(|| chapter.href.clone()));
+        let Some(item) = find_item(&doc, manifest, &chapter.href) else {
+            continue;
+        };
+        let overlay_id = format!(
+            "{}_overlay",
+            doc.attr(item, "id").unwrap_or_else(|| chapter.href.clone())
+        );
         doc.set_attr(item, "media-overlay", &overlay_id);
         let smil_href = format!("MediaOverlays/{}", smil_name(&chapter.href));
         if find_item_by_href(&doc, &manifest_children, &smil_href).is_none() {
@@ -1219,7 +1766,11 @@ fn set_modified(doc: &mut Document, metadata: usize) {
             return;
         }
     }
-    let meta = meta_text(doc, &[("property".into(), "dcterms:modified".into())], &stamp);
+    let meta = meta_text(
+        doc,
+        &[("property".into(), "dcterms:modified".into())],
+        &stamp,
+    );
     let mut children = doc.children(metadata).to_vec();
     children.push(meta);
     doc.set_children(metadata, children);
@@ -1279,7 +1830,10 @@ fn nav_labels(
             if is_toc && !toc.contains_key(&key) {
                 let title = element_text(doc, idx);
                 if !title.trim().is_empty() {
-                    toc.insert(key.clone(), title.split_whitespace().collect::<Vec<_>>().join(" "));
+                    toc.insert(
+                        key.clone(),
+                        title.split_whitespace().collect::<Vec<_>>().join(" "),
+                    );
                 }
             }
             if is_land {
@@ -1306,8 +1860,12 @@ fn guide_types(doc: &Document, root: usize) -> HashMap<String, Vec<String>> {
         if local_name(doc.name(*child)) != "reference" {
             continue;
         }
-        let Some(href) = doc.attr(*child, "href") else { continue };
-        let Some(kind) = doc.attr(*child, "type") else { continue };
+        let Some(href) = doc.attr(*child, "href") else {
+            continue;
+        };
+        let Some(kind) = doc.attr(*child, "type") else {
+            continue;
+        };
         out.entry(href_key(&href)).or_default().push(kind);
     }
     out
@@ -1363,7 +1921,11 @@ fn outermost_types(doc: &Document, element: usize, into: &mut HashMap<String, us
 fn text_len(doc: &Document, idx: usize) -> usize {
     let mut count = 0usize;
     doc.walk(idx, &mut |doc, child| {
-        count += doc.text(child).chars().filter(|ch| !ch.is_whitespace()).count();
+        count += doc
+            .text(child)
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .count();
     });
     count
 }
@@ -1409,6 +1971,7 @@ fn render_smil(
     tracks: &[Track],
     smil_dir: &str,
     opf_dir: &str,
+    windows: Option<&[std::ops::Range<usize>]>,
 ) -> String {
     let seq_id = format!("{}_overlay", href.rsplit('/').next().unwrap_or(href));
     let mut body = String::new();
@@ -1419,13 +1982,20 @@ fn render_smil(
         xml_escape(&seq_id),
         xml_escape(text_rel)
     ));
+    let mut pending = Vec::new();
     for (index, span) in spans.iter().enumerate() {
-        let clips = clip_ranges(tracks, span.start, span.end);
+        let view: &[Track] = if let Some(windows) = windows {
+            let range = windows.get(index).cloned().unwrap_or(0..0);
+            tracks.get(range).unwrap_or(&[])
+        } else {
+            tracks
+        };
+        let clips = clip_ranges(view, span.start, span.end);
         if clips.is_empty() {
             continue;
         }
         for (clip_index, (track_index, begin, end)) in clips.iter().enumerate() {
-            let track = &tracks[*track_index];
+            let track = &view[*track_index];
             let audio_zip = join_path(opf_dir, &format!("Audio/{}", track.epub_name));
             let audio_rel = url_encode_path(&relative_from(smil_dir, &audio_zip));
             let par_id = if clips.len() == 1 {
@@ -1433,19 +2003,82 @@ fn render_smil(
             } else {
                 format!("{}-{index}-{clip_index}", span.id)
             };
-            body.push_str(&format!(
-                r#"<par id="{id}" epub:type="{kind}"><text src="{src}"/><audio src="{audio}" clipBegin="{begin:.3}s" clipEnd="{end:.3}s"/></par>"#,
-                id = xml_escape(&par_id),
-                kind = kind_name(span.kind),
-                src = xml_escape(&format!("{text_rel}#{}", span.id)),
-                audio = xml_escape(&audio_rel),
-                begin = begin,
-                end = end,
-            ));
+            pending.push(SmilClip {
+                text_id: (span.kind != SpanKind::AudioOnly).then(|| span.id.clone()),
+                kind: kind_name(span.kind),
+                par_id,
+                audio: audio_rel,
+                begin: *begin,
+                end: *end,
+            });
+        }
+    }
+    for clip in collapse_audio_only(pending) {
+        let begin = format_smil_clock(clip.begin);
+        let end = format_smil_clock(clip.end);
+        match clip.text_id {
+            Some(text_id) => body.push_str(&format!(
+                r#"<par id="{id}" epub:type="{kind}"><text src="{src}"/><audio src="{audio}" clipBegin="{begin}" clipEnd="{end}"/></par>"#,
+                id = xml_escape(&clip.par_id),
+                kind = clip.kind,
+                src = xml_escape(&format!("{text_rel}#{text_id}")),
+                audio = xml_escape(&clip.audio),
+            )),
+            None => body.push_str(&format!(
+                r#"<par id="{id}"><audio src="{audio}" clipBegin="{begin}" clipEnd="{end}"/></par>"#,
+                id = xml_escape(&clip.par_id),
+                audio = xml_escape(&clip.audio),
+            )),
         }
     }
     body.push_str("</seq></body></smil>");
     body
+}
+
+struct SmilClip {
+    text_id: Option<String>,
+    kind: &'static str,
+    par_id: String,
+    audio: String,
+    begin: f64,
+    end: f64,
+}
+
+/// One `<text>` per fragment, with clips that abut.
+///
+/// A silence par repeats the following sentence id. Readers that ignore
+/// `epub:type` then highlight that sentence during the pause. The silence
+/// before the first sentence is pulled into that sentence, and a later
+/// silence stays on the sentence just spoken. That is the contiguous
+/// clock a ReadBeyond book uses.
+fn collapse_audio_only(clips: Vec<SmilClip>) -> Vec<SmilClip> {
+    let mut merged: Vec<SmilClip> = Vec::new();
+    for mut clip in clips {
+        if clip.text_id.is_none() {
+            if let Some(prev) = merged.last_mut() {
+                if clips_abut(prev, &clip) {
+                    prev.end = clip.end.max(prev.end);
+                    continue;
+                }
+            }
+            merged.push(clip);
+            continue;
+        }
+        if let Some(prev) = merged.last_mut() {
+            if prev.text_id.is_none() && clips_abut(prev, &clip) {
+                clip.begin = prev.begin;
+                *prev = clip;
+                continue;
+            }
+        }
+        merged.push(clip);
+    }
+    merged.retain(|clip| clip.text_id.is_some());
+    merged
+}
+
+fn clips_abut(prev: &SmilClip, next: &SmilClip) -> bool {
+    prev.audio == next.audio && (next.begin - prev.end).abs() <= 0.05
 }
 
 fn clip_ranges(tracks: &[Track], start: f64, end: f64) -> Vec<(usize, f64, f64)> {
@@ -1476,7 +2109,9 @@ fn kind_name(kind: SpanKind) -> &'static str {
 }
 
 fn chapter_duration(spans: &[OverlaySpan]) -> f64 {
-    let Some(first) = spans.first() else { return 0.0 };
+    let Some(first) = spans.first() else {
+        return 0.0;
+    };
     let last = spans.last().unwrap();
     (last.end - first.start).max(0.0)
 }
@@ -1488,6 +2123,19 @@ pub fn format_clock(seconds: f64) -> String {
     let mins = (total / 6000) % 60;
     let hours = total / 360000;
     format!("{hours:02}:{mins:02}:{secs:02}.{centis:02}")
+}
+
+/// SMIL clip clock in the form ReadBeyond writes: `0:00:13.962`.
+/// Hours are not zero-padded. Minutes and seconds are. The fraction is
+/// milliseconds. There is no `s` suffix.
+fn format_smil_clock(seconds: f64) -> String {
+    let millis = (seconds.max(0.0) * 1000.0).round() as u64;
+    let ms = millis % 1000;
+    let total = millis / 1000;
+    let secs = total % 60;
+    let mins = (total / 60) % 60;
+    let hours = total / 3600;
+    format!("{hours}:{mins:02}:{secs:02}.{ms:03}")
 }
 
 fn smil_name(href: &str) -> String {
@@ -1530,7 +2178,10 @@ fn join_path(dir: &str, rel: &str) -> String {
 }
 
 fn relative_from(from_dir: &str, target: &str) -> String {
-    let from: Vec<&str> = from_dir.split('/').filter(|part| !part.is_empty()).collect();
+    let from: Vec<&str> = from_dir
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
     let to: Vec<&str> = target.split('/').filter(|part| !part.is_empty()).collect();
     let mut common = 0usize;
     while common < from.len() && common < to.len() && from[common] == to[common] {
@@ -1550,14 +2201,19 @@ fn relative_from(from_dir: &str, target: &str) -> String {
 }
 
 pub fn url_encode_path(path: &str) -> String {
-    path.split('/').map(url_encode_segment).collect::<Vec<_>>().join("/")
+    path.split('/')
+        .map(url_encode_segment)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn url_encode_segment(segment: &str) -> String {
     let mut out = String::new();
     for byte in segment.bytes() {
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
             _ => out.push_str(&format!("%{byte:02X}")),
         }
     }
@@ -1570,7 +2226,10 @@ fn url_decode(value: &str) -> String {
     let mut index = 0usize;
     while index < bytes.len() {
         if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or(""), 16) {
+            if let Ok(byte) = u8::from_str_radix(
+                std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or(""),
+                16,
+            ) {
                 out.push(byte);
                 index += 3;
                 continue;
@@ -1630,9 +2289,16 @@ mod tests {
         assert!(out.contains("id=\"part.xhtml-s0\""), "{out}");
         assert!(out.contains("id=\"part.xhtml-s1\""), "{out}");
         assert!(out.contains("<em>is</em>"), "{out}");
-        assert!(out.contains("epub:type=\"storyteller:sentence-span\""), "{out}");
+        assert!(
+            out.contains("epub:type=\"storyteller:sentence-span\""),
+            "{out}"
+        );
         assert!(text.letters.contains("thisisthebest"), "{:?}", text.letters);
-        assert!(text.letters.contains("quitplayinggod"), "{:?}", text.letters);
+        assert!(
+            text.letters.contains("quitplayinggod"),
+            "{:?}",
+            text.letters
+        );
         assert!(!text.letters.contains('1'), "{:?}", text.letters);
         assert!(text.sentences.len() >= 3, "{:?}", text.sentences.len());
     }
@@ -1661,8 +2327,18 @@ mod tests {
         assert!(!out.contains(">AL<"), "{out}");
         assert!(!out.contains("trut<"), "{out}");
         assert!(!out.contains(">h."), "{out}");
-        assert_eq!(text.letters.matches("foreword").count(), 1, "{:?}", text.letters);
-        assert_eq!(text.letters.matches("meetingtheholyrascal").count(), 1, "{:?}", text.letters);
+        assert_eq!(
+            text.letters.matches("foreword").count(),
+            1,
+            "{:?}",
+            text.letters
+        );
+        assert_eq!(
+            text.letters.matches("meetingtheholyrascal").count(),
+            1,
+            "{:?}",
+            text.letters
+        );
         assert!(!out.contains("sentence-span\"><p"), "{out}");
         assert_eq!(out.matches(">FOREWORD<").count(), 1, "{out}");
         assert!(text.letters.contains("thetruth"), "{:?}", text.letters);
@@ -1676,7 +2352,10 @@ mod tests {
             })
             .expect("truth sentence");
         let slice = &text.letters[truth.letter_range.clone()];
-        assert!(slice.ends_with("truth") || slice.contains("thetruth"), "{slice}");
+        assert!(
+            slice.ends_with("truth") || slice.contains("thetruth"),
+            "{slice}"
+        );
         assert!(!slice.contains("thisis"), "{slice}");
     }
 
@@ -1711,7 +2390,10 @@ mod tests {
             "{slices:?}\n{out}"
         );
         assert!(out.contains("ADDICTION, SPIRITUALITY,"), "{out}");
-        assert!(out.contains("<br/>") || out.contains("<br />") || out.contains("<br"), "{out}");
+        assert!(
+            out.contains("<br/>") || out.contains("<br />") || out.contains("<br"),
+            "{out}"
+        );
         let heading = out.rsplit("ADDICTION").next().unwrap();
         let close = heading.find("OF UNCOVERY").unwrap();
         let region = &heading[..close];
@@ -1765,10 +2447,72 @@ mod tests {
             &tracks,
             "OEBPS/MediaOverlays",
             "OEBPS",
+            None,
         );
-        assert!(smil.contains("clipBegin=\"1.250s\""), "{smil}");
-        assert!(smil.contains("clipEnd=\"2.500s\""), "{smil}");
+        assert!(smil.contains("clipBegin=\"0:00:01.250\""), "{smil}");
+        assert!(smil.contains("clipEnd=\"0:00:02.500\""), "{smil}");
         assert!(smil.contains("part.xhtml#part.xhtml-s0"), "{smil}");
         assert!(smil.contains("../Audio/book.m4b"), "{smil}");
+        assert!(!smil.contains("s\"/>"), "{smil}");
+    }
+
+    #[test]
+    fn smil_holds_silence_on_one_fragment_per_sentence() {
+        let tracks = vec![Track {
+            source: std::path::PathBuf::from("book.m4a"),
+            epub_name: "part.m4a".into(),
+            media_type: "audio/mp4".into(),
+            start_sample: 0,
+            samples: 160_000,
+        }];
+        let spans = vec![
+            OverlaySpan {
+                id: "c.xhtml-s0".into(),
+                start: 0.0,
+                end: 1.5,
+                kind: SpanKind::AudioOnly,
+            },
+            OverlaySpan {
+                id: "c.xhtml-s0".into(),
+                start: 1.5,
+                end: 2.5,
+                kind: SpanKind::Matched,
+            },
+            OverlaySpan {
+                id: "c.xhtml-s1".into(),
+                start: 2.5,
+                end: 6.0,
+                kind: SpanKind::AudioOnly,
+            },
+            OverlaySpan {
+                id: "c.xhtml-s1".into(),
+                start: 6.0,
+                end: 7.25,
+                kind: SpanKind::Matched,
+            },
+        ];
+        let smil = render_smil(
+            "c.xhtml",
+            "../c.xhtml",
+            &spans,
+            &tracks,
+            "OEBPS/MediaOverlays",
+            "OEBPS",
+            None,
+        );
+        assert_eq!(smil.matches("<par ").count(), 2, "{smil}");
+        let first = par_text(&smil, "c.xhtml-s0-1");
+        assert!(first.contains("clipBegin=\"0:00:00.000\""), "{first}");
+        assert!(first.contains("clipEnd=\"0:00:06.000\""), "{first}");
+        assert!(first.contains("../c.xhtml#c.xhtml-s0"), "{first}");
+        assert!(first.contains("storyteller:matched"), "{first}");
+        let second = par_text(&smil, "c.xhtml-s1-3");
+        assert!(second.contains("clipBegin=\"0:00:06.000\""), "{second}");
+        assert!(second.contains("clipEnd=\"0:00:07.250\""), "{second}");
+        assert!(second.contains("../c.xhtml#c.xhtml-s1"), "{second}");
+        assert_eq!(smil.matches("#c.xhtml-s0").count(), 1, "{smil}");
+        assert_eq!(smil.matches("#c.xhtml-s1").count(), 1, "{smil}");
+        assert!(!smil.contains("audio-only"), "{smil}");
+        assert!(!smil.contains("s\"/>"), "{smil}");
     }
 }

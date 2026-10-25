@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use starlign::emit::Device;
 use starlign::pipeline::{self, Granularity, RunOptions};
 use starlign::runtime;
+use starlign::split::Split;
 use std::path::PathBuf;
 
 #[cfg(feature = "gui")]
@@ -15,7 +16,7 @@ mod gui;
     name = "starlign",
     version,
     about = "Align an EPUB to an audiobook with MMS-300M CTC and write EPUB 3 Media Overlays.",
-    long_about = "Align an EPUB to an audiobook and write EPUB 3 Media Overlays (SMIL) plus sentence or word spans.\n\nWith no command, a window opens for the same options. `starlign gui` opens it explicitly. The window queues audiobook and EPUB pairs and runs them in order.\n\nThe acoustic model is the ONNX MMS-300M forced aligner (CC-BY-NC 4.0, 31 Latin letters). CUDA is used when libonnxruntime_providers_cuda.so loads from the runtime directory; otherwise the same binary runs the model on CPU.\n\nQuartzNet and Citrinet are not included. Their published Storyteller weights are safetensors for a private loader, not ONNX."
+    long_about = "Align an EPUB to an audiobook and write EPUB 3 Media Overlays (SMIL) plus sentence or word spans.\n\nWith no command, a window opens for the same options. `starlign gui` opens it explicitly. The window queues audiobook and EPUB pairs and runs them in order.\n\nThe acoustic model is the ONNX MMS-300M forced aligner (CC-BY-NC 4.0, 31 Latin letters). CUDA is used when the ONNX Runtime CUDA provider loads from the runtime directory beside the program; otherwise the same binary runs the model on CPU. macOS has no NVIDIA CUDA, so that build is CPU-only.\n\nThe window selects Chapter split by default: one audio file per aligned chapter, with clip times starting near the beginning of each file. That is the shape older EPUB 3 read-aloud players expect. On the command line, pass --split-chapters for the same cut, or --split-seconds N or --split-parts N for the other cuts. With no split flag the command line keeps one file. The audio is copied, not re-encoded.\n\nQuartzNet and Citrinet are not included. Their published Storyteller weights are safetensors for a private loader, not ONNX."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -65,6 +66,16 @@ struct RunArgs {
     /// Download MMS-300M fp16 ONNX if --model is missing. The weights are CC-BY-NC 4.0.
     #[arg(long, default_value_t = false)]
     download: bool,
+    /// One audio file per aligned chapter. Clip times start near the beginning of that file.
+    #[arg(long, default_value_t = false)]
+    split_chapters: bool,
+    /// Audio files of at most this many seconds. The last file is the remainder.
+    /// A sentence that crosses a cut stays in the file where it starts.
+    #[arg(long)]
+    split_seconds: Option<f64>,
+    /// Divide the audiobook into this many equal audio files.
+    #[arg(long)]
+    split_parts: Option<u32>,
 }
 
 #[derive(Parser)]
@@ -103,6 +114,16 @@ struct AlignArgs {
     max_seconds: Option<f64>,
     #[arg(long)]
     reports: Option<PathBuf>,
+    /// One audio file per aligned chapter. Clip times start near the beginning of that file.
+    #[arg(long, default_value_t = false)]
+    split_chapters: bool,
+    /// Audio files of at most this many seconds. The last file is the remainder.
+    /// A sentence that crosses a cut stays in the file where it starts.
+    #[arg(long)]
+    split_seconds: Option<f64>,
+    /// Divide the audiobook into this many equal audio files.
+    #[arg(long)]
+    split_parts: Option<u32>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -163,6 +184,7 @@ fn dispatch() -> Result<()> {
                 max_seconds: args.max_seconds,
                 reports: args.reports,
                 download: args.download,
+                split: Split::resolve(args.split_chapters, args.split_seconds, args.split_parts)?,
             };
             pipeline::run(&opts)
         }
@@ -188,6 +210,7 @@ fn dispatch() -> Result<()> {
                 max_seconds: args.max_seconds,
                 reports: args.reports,
                 download: false,
+                split: Split::resolve(args.split_chapters, args.split_seconds, args.split_parts)?,
             };
             pipeline::align_book(&opts)
         }
@@ -201,6 +224,8 @@ fn open_window() -> Result<()> {
     }
     #[cfg(not(feature = "gui"))]
     {
-        anyhow::bail!("this build has no window. Use `starlign run`, `starlign align`, or `starlign emit`.")
+        anyhow::bail!(
+            "this build has no window. Use `starlign run`, `starlign align`, or `starlign emit`."
+        )
     }
 }

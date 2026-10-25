@@ -4,6 +4,7 @@ use crate::audio::{self, Timeline};
 use crate::ctc::{self, Anchor, Emissions, TokenAlignment};
 use crate::emit::{self, Device};
 use crate::epub::{self, Book, ChapterOutput, OverlaySpan, SpanKind};
+use crate::split::Split;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -29,6 +30,8 @@ pub struct RunOptions {
     pub max_seconds: Option<f64>,
     pub reports: Option<PathBuf>,
     pub download: bool,
+    /// How the EPUB stores the audiobook. The default keeps each source file whole.
+    pub split: Split,
 }
 
 pub const MODEL_URL: &str = "https://huggingface.co/onnx-community/mms-300m-1130-forced-aligner-ONNX/resolve/main/onnx/model_fp16.onnx";
@@ -52,12 +55,7 @@ pub fn emit_audio(
     let pcm = temp_pcm();
     let guard = PcmGuard(pcm.clone());
     let timeline = audio::decode_audiobook(audiobook, &pcm, max_seconds)?;
-    let (emissions, device_name) = emit::emit_pcm(
-        &pcm,
-        timeline.samples(),
-        model,
-        device,
-    )?;
+    let (emissions, device_name) = emit::emit_pcm(&pcm, timeline.samples(), model, device)?;
     if let Some(parent) = emissions_path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
@@ -150,7 +148,12 @@ fn timeline_only(audiobook: &Path, max_seconds: Option<f64>) -> Result<Timeline>
     })
 }
 
-fn align_loaded(opts: &RunOptions, timeline: &Timeline, emissions: &Emissions, device: &str) -> Result<()> {
+fn align_loaded(
+    opts: &RunOptions,
+    timeline: &Timeline,
+    emissions: &Emissions,
+    device: &str,
+) -> Result<()> {
     let book = Book::open(&opts.epub)?;
     let sources = book.chapters()?;
     let mut excluded: Vec<(i64, i64)> = Vec::new();
@@ -198,10 +201,17 @@ fn align_loaded(opts: &RunOptions, timeline: &Timeline, emissions: &Emissions, d
         if let Some(span) = claimed {
             excluded.push(span);
         }
-        if let Some(last) = spans.iter().map(|span| span.end).max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)) {
+        if let Some(last) = spans
+            .iter()
+            .map(|span| span.end)
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        {
             covered_until = covered_until.max(last);
         }
-        let matched = spans.iter().filter(|span| span.kind == SpanKind::Matched).count();
+        let matched = spans
+            .iter()
+            .filter(|span| span.kind == SpanKind::Matched)
+            .count();
         crate::say!(
             "{}  confidence {:.2}  {} spans  {:.1}s–{:.1}s",
             source.href,
@@ -228,7 +238,13 @@ fn align_loaded(opts: &RunOptions, timeline: &Timeline, emissions: &Emissions, d
     if outputs.is_empty() {
         bail!("no chapter aligned. The audio may not contain this text, or --max-seconds cut it off before the chapter.");
     }
-    book.write(&opts.output, &outputs, &timeline.tracks, timeline.duration_secs())?;
+    book.write(
+        &opts.output,
+        &outputs,
+        &timeline.tracks,
+        timeline.duration_secs(),
+        opts.split,
+    )?;
     crate::say!("wrote {}", opts.output.display());
     if let Some(path) = &opts.reports {
         let report = serde_json::json!({
@@ -249,7 +265,12 @@ struct Found {
     tokens: Vec<TokenAlignment>,
 }
 
-fn align_query(query: &str, emissions: &Emissions, excluded: &[(i64, i64)], drop_unread: bool) -> Option<Found> {
+fn align_query(
+    query: &str,
+    emissions: &Emissions,
+    excluded: &[(i64, i64)],
+    drop_unread: bool,
+) -> Option<Found> {
     let mut boundary = ctc::find_boundaries(query, emissions, excluded)?;
     let (start, end) = narrow_to_free(excluded, boundary.start, boundary.end)?;
     boundary.start = start;
@@ -299,7 +320,11 @@ fn narrow_to_free(excluded: &[(i64, i64)], start: i64, end: i64) -> Option<(i64,
     if end <= start {
         return None;
     }
-    let mut ranges: Vec<(i64, i64)> = excluded.iter().copied().filter(|(lo, hi)| hi > lo).collect();
+    let mut ranges: Vec<(i64, i64)> = excluded
+        .iter()
+        .copied()
+        .filter(|(lo, hi)| hi > lo)
+        .collect();
     if ranges.is_empty() {
         return Some((start, end));
     }
@@ -339,7 +364,11 @@ fn narrow_to_free(excluded: &[(i64, i64)], start: i64, end: i64) -> Option<(i64,
         return Some(window);
     }
     let buried = merged.iter().any(|(lo, hi)| *lo <= start && end <= *hi);
-    if buried { None } else { Some((start, end)) }
+    if buried {
+        None
+    } else {
+        Some((start, end))
+    }
 }
 
 /// Longest silence, in frames, tolerated inside one sentence. A wider gap means
@@ -379,7 +408,13 @@ fn time_units(
         if sentence.letter_range.is_empty() {
             continue;
         }
-        let kept = keep_sentence(&sentence.letter_range, found, &mut prev_end, start_bias, end_bias);
+        let kept = keep_sentence(
+            &sentence.letter_range,
+            found,
+            &mut prev_end,
+            start_bias,
+            end_bias,
+        );
         if let Some(span) = &kept {
             let lo = origin + span.start_frame;
             let hi = origin + span.end_frame;
@@ -403,7 +438,8 @@ fn time_units(
                 ));
             }
         } else if let Some(span) = &kept {
-            let (start, end) = frame_span_to_time(emissions, origin, span.start_frame, span.end_frame);
+            let (start, end) =
+                frame_span_to_time(emissions, origin, span.start_frame, span.end_frame);
             raw.push(RawSpan {
                 id: sentence.id.clone(),
                 start: Some(start),
@@ -549,14 +585,24 @@ fn time_word(
     }
 }
 
-fn frame_span_to_time(emissions: &Emissions, origin: i64, start_frame: i64, end_frame: i64) -> (f64, f64) {
+fn frame_span_to_time(
+    emissions: &Emissions,
+    origin: i64,
+    start_frame: i64,
+    end_frame: i64,
+) -> (f64, f64) {
     let start = emissions.frame_start(origin + start_frame).max(0.0);
     let end = emissions.frame_end(origin + end_frame.max(start_frame));
     (start, end.max(start))
 }
 
 /// The run with the most characters. `end` is inclusive.
-fn find_dominant_run(tokens: &[TokenAlignment], start: usize, end: usize, max_gap: i64) -> (usize, usize) {
+fn find_dominant_run(
+    tokens: &[TokenAlignment],
+    start: usize,
+    end: usize,
+    max_gap: i64,
+) -> (usize, usize) {
     let mut best = (start, start);
     let mut run_start = start;
     let mut index = start + 1;
@@ -617,7 +663,12 @@ fn extend_dominant_run(
     (start_frame, end_frame)
 }
 
-pub(crate) fn finalize_spans(raw: &[RawSpan], gap_seconds: f64, drop_unread: bool, origin: f64) -> Vec<OverlaySpan> {
+pub(crate) fn finalize_spans(
+    raw: &[RawSpan],
+    gap_seconds: f64,
+    drop_unread: bool,
+    origin: f64,
+) -> Vec<OverlaySpan> {
     let mut placed: Vec<Option<(f64, f64)>> = raw
         .iter()
         .map(|span| match (span.start, span.end) {
@@ -635,8 +686,16 @@ pub(crate) fn finalize_spans(raw: &[RawSpan], gap_seconds: f64, drop_unread: boo
         while end < placed.len() && placed[end].is_none() {
             end += 1;
         }
-        let left = if index > 0 { placed[index - 1].map(|(_, value)| value) } else { None };
-        let right = if end < placed.len() { placed[end].map(|(value, _)| value) } else { None };
+        let left = if index > 0 {
+            placed[index - 1].map(|(_, value)| value)
+        } else {
+            None
+        };
+        let right = if end < placed.len() {
+            placed[end].map(|(value, _)| value)
+        } else {
+            None
+        };
         let count = (end - index) as f64;
         match (left, right) {
             (Some(left), Some(right)) => {
@@ -758,6 +817,21 @@ pub fn default_model_path() -> PathBuf {
         candidates.push(PathBuf::from(&home).join(".cache/starlign/mms-fp16.onnx"));
         candidates.push(PathBuf::from(&home).join(".cache/stalign/mms-fp16.onnx"));
     }
+    if cfg!(windows) {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA").filter(|value| !value.is_empty()) {
+            candidates.push(PathBuf::from(local).join("starlign").join("mms-fp16.onnx"));
+        } else if let Some(profile) =
+            std::env::var_os("USERPROFILE").filter(|value| !value.is_empty())
+        {
+            candidates.push(
+                PathBuf::from(profile)
+                    .join("AppData")
+                    .join("Local")
+                    .join("starlign")
+                    .join("mms-fp16.onnx"),
+            );
+        }
+    }
     for candidate in &candidates {
         if candidate.is_file() {
             return candidate.clone();
@@ -799,7 +873,11 @@ pub fn ensure_model(path: &Path, download: bool) -> Result<()> {
 }
 
 fn temp_pcm() -> PathBuf {
-    std::env::temp_dir().join(format!("stalign-{}-{}.f32", std::process::id(), std::process::id()))
+    std::env::temp_dir().join(format!(
+        "stalign-{}-{}.f32",
+        std::process::id(),
+        std::process::id()
+    ))
 }
 
 struct PcmGuard(PathBuf);
@@ -830,7 +908,10 @@ fn load_tracks(emissions: &Path) -> Result<Option<Timeline>> {
         return Ok(None);
     }
     let tracks = serde_json::from_slice(&std::fs::read(&path)?)?;
-    Ok(Some(Timeline { pcm_path: None, tracks }))
+    Ok(Some(Timeline {
+        pcm_path: None,
+        tracks,
+    }))
 }
 
 #[cfg(test)]
@@ -861,8 +942,14 @@ mod tests {
         // the first sentence. The six-second hole between sentences stays audio-only.
         assert!((spans[0].start - 0.0).abs() < 1e-6, "{:?}", spans[0]);
         assert!((spans[0].end - 2.0).abs() < 1e-6, "{:?}", spans[0]);
-        let hole = spans.iter().find(|span| span.kind == SpanKind::AudioOnly).unwrap();
-        assert!((hole.start - 2.0).abs() < 1e-6 && (hole.end - 8.0).abs() < 1e-6, "{hole:?}");
+        let hole = spans
+            .iter()
+            .find(|span| span.kind == SpanKind::AudioOnly)
+            .unwrap();
+        assert!(
+            (hole.start - 2.0).abs() < 1e-6 && (hole.end - 8.0).abs() < 1e-6,
+            "{hole:?}"
+        );
         let short = finalize_spans(&raw, 10.0, false, 0.0);
         assert!(short.iter().all(|span| span.kind != SpanKind::AudioOnly));
         assert!((short[0].end - 8.0).abs() < 1e-6 || (short[0].start - 0.0).abs() < 1e-6);
@@ -891,7 +978,11 @@ mod tests {
             times,
         };
         let found = align_query(letters, &emissions, &[], false).expect("boundary");
-        let finite = found.tokens.iter().filter(|token| token.start_frame >= 0).count();
+        let finite = found
+            .tokens
+            .iter()
+            .filter(|token| token.start_frame >= 0)
+            .count();
         assert!(finite > letters.len() / 2, "{finite}");
     }
 

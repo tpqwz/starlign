@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Link x86_64-unknown-freebsd with zig's FreeBSD 14 libc.
+
+Rustc also names libkvm, libmemstat, libprocstat, and libdevstat. Those ship
+in the FreeBSD base system, not in zig. Empty shared objects satisfy the
+link. --as-needed leaves them out of the binary when nothing references them.
+A FreeBSD machine still provides the real libraries if a later std path needs
+them.
+"""
+
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+
+def zig_bin() -> str:
+    env = os.environ.get("STARLIGN_ZIG")
+    if env:
+        return env
+    home = os.path.expanduser("~/.local/opt/zig/zig")
+    if os.path.isfile(home):
+        return home
+    found = shutil.which("zig")
+    if found:
+        return found
+    sys.stderr.write("zig was not found. Set STARLIGN_ZIG to the zig binary.\n")
+    raise SystemExit(1)
+
+
+def stub_dir() -> str:
+    cache = os.environ.get("STARLIGN_FBSD_STUBS")
+    if not cache:
+        cache = os.path.join(os.path.expanduser("~/.cache/starlign"), "freebsd-libs")
+    os.makedirs(cache, exist_ok=True)
+    missing = [
+        name
+        for name in ("kvm", "memstat", "procstat", "devstat")
+        if not os.path.isfile(os.path.join(cache, f"lib{name}.so"))
+    ]
+    if not missing:
+        return cache
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "stub.c")
+        with open(src, "w", encoding="utf-8") as handle:
+            handle.write("void starlign_fbsd_stub(void) {}\n")
+        for name in missing:
+            out = os.path.join(cache, f"lib{name}.so")
+            result = subprocess.run(
+                [
+                    zig_bin(),
+                    "cc",
+                    "-target",
+                    "x86_64-freebsd",
+                    "-shared",
+                    "-o",
+                    out,
+                    src,
+                ]
+            )
+            if result.returncode != 0:
+                raise SystemExit(result.returncode)
+    return cache
+
+
+def expand(argv: list[str]) -> list[str]:
+    out: list[str] = []
+    for arg in argv:
+        if len(arg) > 1 and arg.startswith("@") and os.path.isfile(arg[1:]):
+            with open(arg[1:], encoding="utf-8", errors="surrogateescape") as handle:
+                nested = []
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if len(line) >= 2 and line[0] == '"' and line[-1] == '"':
+                        line = line[1:-1]
+                    nested.append(line)
+            out.extend(expand(nested))
+            continue
+        out.append(arg)
+    return out
+
+
+def main() -> int:
+    args = ["-L" + stub_dir()]
+    for arg in expand(sys.argv[1:]):
+        if arg == "-nodefaultlibs":
+            continue
+        args.append(arg)
+    result = subprocess.run([zig_bin(), "cc", "-target", "x86_64-freebsd", *args])
+    return result.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

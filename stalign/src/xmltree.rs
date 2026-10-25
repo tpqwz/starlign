@@ -90,7 +90,11 @@ impl Document {
         let Some(root) = root else {
             bail!("xml document has no root element");
         };
-        Ok(Self { nodes, root, xml_decl })
+        Ok(Self {
+            nodes,
+            root,
+            xml_decl,
+        })
     }
 
     pub fn to_xml(&self) -> Result<String> {
@@ -112,7 +116,11 @@ impl Document {
             NodeData::Comment(text) => {
                 writer.write_event(Event::Comment(BytesText::new(text)))?;
             }
-            NodeData::Element { name, attrs, children } => {
+            NodeData::Element {
+                name,
+                attrs,
+                children,
+            } => {
                 let mut start = BytesStart::new(name.as_str());
                 for (key, value) in attrs {
                     start.push_attribute((key.as_str(), value.as_str()));
@@ -253,7 +261,10 @@ fn push_element(nodes: &mut Vec<Node>, elem: &BytesStart) -> Result<usize> {
     for attr in elem.attributes() {
         let attr = attr.context("xml attribute")?;
         let key = String::from_utf8_lossy(attr.key.as_ref()).into_owned();
-        let value = attr.unescape_value().context("xml attribute value")?.into_owned();
+        let value = attr
+            .unescape_value()
+            .context("xml attribute value")?
+            .into_owned();
         attrs.push((key, value));
     }
     let idx = nodes.len();

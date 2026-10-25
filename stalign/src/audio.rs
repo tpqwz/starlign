@@ -50,7 +50,10 @@ pub struct Timeline {
 
 impl Timeline {
     pub fn samples(&self) -> u64 {
-        self.tracks.last().map(|t| t.start_sample + t.samples).unwrap_or(0)
+        self.tracks
+            .last()
+            .map(|t| t.start_sample + t.samples)
+            .unwrap_or(0)
     }
 
     pub fn duration_secs(&self) -> f64 {
@@ -76,15 +79,23 @@ impl Timeline {
     }
 }
 
-pub fn decode_audiobook(input: &Path, pcm_path: &Path, max_seconds: Option<f64>) -> Result<Timeline> {
+pub fn decode_audiobook(
+    input: &Path,
+    pcm_path: &Path,
+    max_seconds: Option<f64>,
+) -> Result<Timeline> {
     let files = audio_files(input)?;
     if let Some(parent) = pcm_path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
         }
     }
-    let file = File::create(pcm_path).with_context(|| format!("creating {}", pcm_path.display()))?;
-    let mut writer = PcmWriter::new(file, max_seconds.map(|s| (s * SAMPLE_RATE as f64).round() as u64))?;
+    let file =
+        File::create(pcm_path).with_context(|| format!("creating {}", pcm_path.display()))?;
+    let mut writer = PcmWriter::new(
+        file,
+        max_seconds.map(|s| (s * SAMPLE_RATE as f64).round() as u64),
+    )?;
     let mut tracks = Vec::new();
     let mut names = Vec::new();
     for path in files {
@@ -220,7 +231,10 @@ impl PcmWriter {
     fn ensure_rate(&mut self, rate: u32) -> Result<()> {
         let started = self.written > 0 || self.input_frames > 0 || !self.pending.is_empty();
         if started && rate != self.pending_rate {
-            bail!("audio files have different sample rates ({rate} vs {})", self.pending_rate);
+            bail!(
+                "audio files have different sample rates ({rate} vs {})",
+                self.pending_rate
+            );
         }
         self.pending_rate = rate;
         if rate == SAMPLE_RATE {
@@ -291,7 +305,9 @@ impl PcmWriter {
             for chunk in &chunks {
                 self.emit(chunk)?;
             }
-            let expected = ((self.input_frames as f64) * SAMPLE_RATE as f64 / self.pending_rate as f64).round() as u64;
+            let expected = ((self.input_frames as f64) * SAMPLE_RATE as f64
+                / self.pending_rate as f64)
+                .round() as u64;
             if self.written > expected {
                 // The flush can overshoot by a handful of samples. The caller
                 // uses `written`, so trim the file back to the input duration.
@@ -346,7 +362,12 @@ fn decode_file(path: &Path, writer: &mut PcmWriter) -> Result<()> {
         hint.with_extension(ext);
     }
     let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
         .with_context(|| format!("probing {}", path.display()))?;
     let mut format = probed.format;
     let track = format
@@ -390,7 +411,11 @@ fn decode_file(path: &Path, writer: &mut PcmWriter) -> Result<()> {
             Err(err) => return Err(anyhow!("decode {}: {err}", path.display())),
         };
         let spec = *decoded.spec();
-        let rate = if spec.rate > 0 { spec.rate } else { fallback_rate };
+        let rate = if spec.rate > 0 {
+            spec.rate
+        } else {
+            fallback_rate
+        };
         if rate == 0 {
             bail!("unknown sample rate in {}", path.display());
         }

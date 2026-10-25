@@ -14,7 +14,6 @@ use ort::session::Session;
 use ort::value::Tensor;
 use std::path::Path;
 use std::process::Command;
-use std::os::unix::process::CommandExt;
 
 const CORE_SECONDS: f64 = 20.0;
 const CONTEXT_SECONDS: f64 = 2.0;
@@ -30,7 +29,12 @@ pub enum Device {
     Cuda,
 }
 
-pub fn emit_pcm(pcm: &Path, samples: u64, model_path: &Path, device: Device) -> Result<(Emissions, String)> {
+pub fn emit_pcm(
+    pcm: &Path,
+    samples: u64,
+    model_path: &Path,
+    device: Device,
+) -> Result<(Emissions, String)> {
     if samples == 0 {
         bail!("no audio to emit");
     }
@@ -78,11 +82,7 @@ pub fn emit_pcm(pcm: &Path, samples: u64, model_path: &Path, device: Device) -> 
         let done = core_end as f64 / SAMPLE_RATE as f64;
         let total = samples as f64 / SAMPLE_RATE as f64;
         let rate = done / started.elapsed().as_secs_f64().max(0.001);
-        crate::say!(
-            "emit {done:.0}/{total:.0}s  {:.2}x  {}",
-            rate,
-            model.device
-        );
+        crate::say!("emit {done:.0}/{total:.0}s  {:.2}x  {}", rate, model.device);
         core_start = core_end;
     }
     if times.is_empty() {
@@ -174,8 +174,6 @@ impl Model {
         })
     }
 
-
-
     fn run(&mut self, samples: &[f32]) -> Result<Logits> {
         let frames_hint = conv_out_len(samples.len());
         let (center0, hop) = if frames_hint > 0 {
@@ -191,7 +189,9 @@ impl Model {
                 (shape, data.to_vec())
             }
             Err(_) => {
-                let (shape, data) = output.try_extract_tensor::<f16>().context("model output is neither f32 nor f16")?;
+                let (shape, data) = output
+                    .try_extract_tensor::<f16>()
+                    .context("model output is neither f32 nor f16")?;
                 let shape: Vec<usize> = shape.iter().map(|d| *d as usize).collect();
                 let data: Vec<f32> = data.iter().copied().map(f16::to_f32).collect();
                 (shape, data)
@@ -203,7 +203,10 @@ impl Model {
             other => bail!("unexpected logits shape {other:?}"),
         };
         if frames * classes != data.len() {
-            bail!("logits length {} does not match {frames}x{classes}", data.len());
+            bail!(
+                "logits length {} does not match {frames}x{classes}",
+                data.len()
+            );
         }
         let hop = if frames_hint > 0 && frames > 0 {
             hop
@@ -212,7 +215,11 @@ impl Model {
         } else {
             hop
         };
-        let center0 = if frames_hint == frames { center0 } else { hop * 0.5 };
+        let center0 = if frames_hint == frames {
+            center0
+        } else {
+            hop * 0.5
+        };
         Ok(Logits {
             data,
             frames,
@@ -230,7 +237,10 @@ impl Model {
             let values = Tensor::from_array(Array2::from_shape_vec((1, data.len()), data)?)?;
             return self.bind_and_run(input_name, values, mask_name, samples.len());
         }
-        let values = Tensor::from_array(Array2::from_shape_vec((1, samples.len()), samples.to_vec())?)?;
+        let values = Tensor::from_array(Array2::from_shape_vec(
+            (1, samples.len()),
+            samples.to_vec(),
+        )?)?;
         self.bind_and_run(input_name, values, mask_name, samples.len())
     }
 
@@ -256,7 +266,8 @@ impl Model {
                 ])?
             }
         } else {
-            self.session.run(ort::inputs![input_name.as_str() => values])?
+            self.session
+                .run(ort::inputs![input_name.as_str() => values])?
         };
         Ok(outputs)
     }
@@ -266,10 +277,10 @@ fn environment(preload_cuda: bool) -> Result<ort::environment::Environment> {
     let builder = if let Some(dir) = runtime::runtime_lib_dir() {
         if preload_cuda && runtime::lib_dir_has_cuda(&dir) {
             let _ = ort::ep::cuda::preload_dylibs(None, Some(dir.as_path()));
-            let _ = ort::util::preload_dylib(dir.join("libonnxruntime_providers_shared.so"));
-            let _ = ort::util::preload_dylib(dir.join("libonnxruntime_providers_cuda.so"));
+            let _ = ort::util::preload_dylib(dir.join(runtime::shared_provider_file()));
+            let _ = ort::util::preload_dylib(dir.join(runtime::cuda_provider_file()));
         }
-        ort::init_from(dir.join("libonnxruntime.so")).context("loading ONNX Runtime")?
+        ort::init_from(dir.join(runtime::ort_library_file())).context("loading ONNX Runtime")?
     } else {
         ort::init()
     };
@@ -284,7 +295,9 @@ fn open_session(env: &ort::environment::Environment, path: &Path, cuda: bool) ->
     // SessionBuilder errors carry the builder and are not Send, so they cannot
     // use `?` into anyhow. Convert them to a string here.
     let mut builder = Session::builder(env).map_err(|err| anyhow!("session: {err}"))?;
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
     if cuda {
         builder = builder
             .with_execution_providers([ort::ep::CUDA::default()
@@ -326,9 +339,28 @@ fn relaunch_on_cpu() -> ! {
         args.push("--device".to_string());
         args.push("cpu".to_string());
     }
-    let err = Command::new(exe).args(&args).exec();
-    crate::say!("failed to relaunch on CPU: {err}");
-    std::process::exit(1);
+    let mut command = Command::new(exe);
+    command.args(&args);
+    // exec keeps the same process, so a second ONNX Runtime environment is
+    // never created in-process. Windows has no exec; wait for the child and
+    // return its status. The child inherits the piped output.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = command.exec();
+        crate::say!("failed to relaunch on CPU: {err}");
+        std::process::exit(1);
+    }
+    #[cfg(not(unix))]
+    {
+        match command.status() {
+            Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+            Err(err) => {
+                crate::say!("failed to relaunch on CPU: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
 }
 
 fn normalize(samples: &mut [f32]) {
@@ -337,10 +369,14 @@ fn normalize(samples: &mut [f32]) {
     }
     let n = samples.len() as f32;
     let mean = samples.iter().sum::<f32>() / n;
-    let var = samples.iter().map(|sample| {
-        let delta = *sample - mean;
-        delta * delta
-    }).sum::<f32>() / n;
+    let var = samples
+        .iter()
+        .map(|sample| {
+            let delta = *sample - mean;
+            delta * delta
+        })
+        .sum::<f32>()
+        / n;
     let inv = 1.0 / (var + 1e-7).sqrt();
     for sample in samples {
         *sample = (*sample - mean) * inv;

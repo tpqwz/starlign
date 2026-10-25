@@ -141,7 +141,11 @@ impl Emissions {
         read_f32s(&mut file, &mut data)?;
         let mut times = vec![0f64; frames];
         read_f64s(&mut file, &mut times)?;
-        Ok(Self { classes, data, times })
+        Ok(Self {
+            classes,
+            data,
+            times,
+        })
     }
 
     pub fn slice(&self, start: usize, end: usize) -> Self {
@@ -354,7 +358,13 @@ fn find_in_document(
     if matches.len() < MIN_INLIERS {
         return None;
     }
-    let line = fit_line(&matches, pair_separation, min_slope, max_slope, inlier_tolerance)?;
+    let line = fit_line(
+        &matches,
+        pair_separation,
+        min_slope,
+        max_slope,
+        inlier_tolerance,
+    )?;
     // The first fit can keep a second copy of an n-gram that sits on a later
     // chapter. The refined line is the one the chapter actually follows; a hit
     // more than `inlier_tolerance` off it, or a worse duplicate of the same
@@ -388,15 +398,19 @@ fn find_in_document(
         .map(|m| m.position as f64 + line.slope * (query.len() - m.offset) as f64)
         .fold(f64::NEG_INFINITY, f64::max);
     let start_pad = BOUNDARY_PAD_FRAMES.max(0.25 * (head[0].position as f64 - extrapolated_start));
-    let end_pad = BOUNDARY_PAD_FRAMES
-        .max(0.25 * (extrapolated_end - tail[tail.len() - 1].position as f64));
+    let end_pad =
+        BOUNDARY_PAD_FRAMES.max(0.25 * (extrapolated_end - tail[tail.len() - 1].position as f64));
     let start = extrapolated_start - start_pad;
     let end = extrapolated_end + end_pad;
     if end <= start {
         return None;
     }
 
-    let matched_grams = matches.iter().map(|m| m.offset).collect::<std::collections::HashSet<_>>().len();
+    let matched_grams = matches
+        .iter()
+        .map(|m| m.offset)
+        .collect::<std::collections::HashSet<_>>()
+        .len();
     if matched_grams == 0 {
         return None;
     }
@@ -448,11 +462,17 @@ fn collect_matches(
             continue;
         };
         for &position in positions {
-            if excluded.iter().any(|&(start, end)| start <= position && position < end) {
+            if excluded
+                .iter()
+                .any(|&(start, end)| start <= position && position < end)
+            {
                 continue;
             }
             let _ = q;
-            matches.push(Anchor { offset: i, position });
+            matches.push(Anchor {
+                offset: i,
+                position,
+            });
         }
     }
     (matches, query_ngrams)
@@ -534,7 +554,11 @@ fn fit_line(
         }
         slopes.push((hi.position - lo.position) as f64 / (hi.offset - lo.offset) as f64);
     }
-    let slope = if slopes.is_empty() { slope0 } else { median(&mut slopes) };
+    let slope = if slopes.is_empty() {
+        slope0
+    } else {
+        median(&mut slopes)
+    };
     let intercept = if inliers.is_empty() {
         intercept0
     } else {
@@ -544,7 +568,11 @@ fn fit_line(
             .collect();
         median(&mut values)
     };
-    Some(LineFit { slope, intercept, inliers })
+    Some(LineFit {
+        slope,
+        intercept,
+        inliers,
+    })
 }
 
 fn closest_per_offset(inliers: &mut Vec<Anchor>, slope: f64, intercept: f64) {
@@ -602,7 +630,12 @@ fn anchor_of(point: Point) -> Option<Anchor> {
     })
 }
 
-fn extend_edge(sorted_matches: &[Point], sorted_inliers: &[Point], global_slope: f64, tolerance: f64) -> Vec<Point> {
+fn extend_edge(
+    sorted_matches: &[Point],
+    sorted_inliers: &[Point],
+    global_slope: f64,
+    tolerance: f64,
+) -> Vec<Point> {
     let Some(last_inlier) = sorted_inliers.last().copied() else {
         return Vec::new();
     };
@@ -651,7 +684,11 @@ fn fit_local_line(points: &[Point], fallback: f64) -> (f64, f64) {
         }
         i += stride;
     }
-    let slope = if slopes.is_empty() { fallback } else { median(&mut slopes) };
+    let slope = if slopes.is_empty() {
+        fallback
+    } else {
+        median(&mut slopes)
+    };
     let mut intercepts: Vec<f64> = points
         .iter()
         .map(|m| m.position as f64 - slope * m.offset as f64)
@@ -728,10 +765,21 @@ fn evidence_range(offsets: &[usize], query_len: usize) -> ((usize, usize), (usiz
     let last = offsets[clusters[last_cluster].1] + NGRAM;
     let threshold_us = threshold as usize;
     let evidence = (
-        if first > threshold_us { first - threshold_us } else { 0 },
-        if query_len - last > threshold_us { last + threshold_us } else { query_len },
+        if first > threshold_us {
+            first - threshold_us
+        } else {
+            0
+        },
+        if query_len - last > threshold_us {
+            last + threshold_us
+        } else {
+            query_len
+        },
     );
-    ((evidence.0, evidence.1.min(query_len)), (first, last.min(query_len)))
+    (
+        (evidence.0, evidence.1.min(query_len)),
+        (first, last.min(query_len)),
+    )
 }
 
 fn select_anchors(
@@ -752,45 +800,51 @@ fn select_anchors(
         cache.insert((m.offset, m.position), score);
         score
     };
-    let select = |min_agreement: Option<f64>, cache: &mut HashMap<(usize, i64), f64>| -> Vec<Anchor> {
-        let mut anchors = Vec::new();
-        let mut i = 0usize;
-        while i < query.len() {
-            let window_start = i.saturating_sub(ANCHOR_SPACING / 2);
-            let window_end = (i + ANCHOR_SPACING / 2).min(query.len());
-            let mut candidates: Vec<Anchor> = inliers
-                .iter()
-                .copied()
-                .filter(|m| window_start <= m.offset && m.offset < window_end)
-                .collect();
-            candidates.sort_by_key(|m| m.offset.abs_diff(i));
-            for c in candidates {
-                let gram = &query[c.offset..(c.offset + NGRAM).min(query.len())];
-                if gram.len() < NGRAM {
-                    continue;
-                }
-                if document_index.get(gram).map(|v| v.len()) != Some(1) {
-                    continue;
-                }
-                if query_ngrams.get(gram).map(|v| v.len()) != Some(1) {
-                    continue;
-                }
-                if let Some(min) = min_agreement {
-                    if agreement(c, cache) < min {
+    let select =
+        |min_agreement: Option<f64>, cache: &mut HashMap<(usize, i64), f64>| -> Vec<Anchor> {
+            let mut anchors = Vec::new();
+            let mut i = 0usize;
+            while i < query.len() {
+                let window_start = i.saturating_sub(ANCHOR_SPACING / 2);
+                let window_end = (i + ANCHOR_SPACING / 2).min(query.len());
+                let mut candidates: Vec<Anchor> = inliers
+                    .iter()
+                    .copied()
+                    .filter(|m| window_start <= m.offset && m.offset < window_end)
+                    .collect();
+                candidates.sort_by_key(|m| m.offset.abs_diff(i));
+                for c in candidates {
+                    let gram = &query[c.offset..(c.offset + NGRAM).min(query.len())];
+                    if gram.len() < NGRAM {
                         continue;
                     }
+                    if document_index.get(gram).map(|v| v.len()) != Some(1) {
+                        continue;
+                    }
+                    if query_ngrams.get(gram).map(|v| v.len()) != Some(1) {
+                        continue;
+                    }
+                    if let Some(min) = min_agreement {
+                        if agreement(c, cache) < min {
+                            continue;
+                        }
+                    }
+                    anchors.push(c);
+                    break;
                 }
-                anchors.push(c);
-                break;
+                i += ANCHOR_SPACING;
             }
-            i += ANCHOR_SPACING;
-        }
-        anchors
-    };
+            anchors
+        };
     let mut anchors = select(None, &mut agreements);
     if anchors.len() >= ANCHOR_CALIBRATION_MINIMUM {
-        let mut scores: Vec<f64> = anchors.iter().copied().map(|a| agreement(a, &mut agreements)).collect();
-        let threshold = (ANCHOR_AGREEMENT_FRACTION * median(&mut scores)).max(ANCHOR_AGREEMENT_FLOOR);
+        let mut scores: Vec<f64> = anchors
+            .iter()
+            .copied()
+            .map(|a| agreement(a, &mut agreements))
+            .collect();
+        let threshold =
+            (ANCHOR_AGREEMENT_FRACTION * median(&mut scores)).max(ANCHOR_AGREEMENT_FLOOR);
         anchors = select(Some(threshold), &mut agreements);
     }
     let mut monotonic = Vec::new();
@@ -897,7 +951,13 @@ pub fn ctc_viterbi(
     }
     let state_column: Vec<usize> = tokens
         .iter()
-        .map(|token| if *token == star_id { star_column } else { *token as usize })
+        .map(|token| {
+            if *token == star_id {
+                star_column
+            } else {
+                *token as usize
+            }
+        })
         .collect();
     let num_states = tokens.len();
     let mut prev = vec![f32::NEG_INFINITY; num_states];
@@ -982,7 +1042,11 @@ pub fn ctc_viterbi(
     for (l, label) in labels.iter().enumerate() {
         let state = 2 * l + 1;
         let count = counts[state];
-        let mean = if count > 0 { score_sums[state] / count as f64 } else { f64::NEG_INFINITY };
+        let mean = if count > 0 {
+            score_sums[state] / count as f64
+        } else {
+            f64::NEG_INFINITY
+        };
         alignments.push(TokenAlignment {
             label: *label,
             start_frame: first[state],
@@ -1039,7 +1103,10 @@ pub fn forced_align(
         if le <= ls || fe <= fs {
             continue;
         }
-        let query: Vec<char> = labels[ls..le].iter().map(|id| char_of(*id).unwrap_or('?')).collect();
+        let query: Vec<char> = labels[ls..le]
+            .iter()
+            .map(|id| char_of(*id).unwrap_or('?'))
+            .collect();
         let segment = emissions.slice(fs, fe);
         let (greedy, gframes) = greedy_decode(&segment);
         let heard: Vec<(char, i64)> = greedy.chars().zip(gframes).collect();
@@ -1122,7 +1189,9 @@ fn tighten_phrase(
     if frames_per <= STRETCHED_FRAMES_PER_LETTER {
         return;
     }
-    let hits: Vec<usize> = (first..=last).filter(|&index| tokens[index].score > -4.0).collect();
+    let hits: Vec<usize> = (first..=last)
+        .filter(|&index| tokens[index].score > -4.0)
+        .collect();
     let mut last_tight = None;
     for pair in hits.windows(2) {
         let gap = tokens[pair[1]].start_frame - tokens[pair[0]].start_frame;
@@ -1216,12 +1285,28 @@ fn assign_monotonic(
     if query.is_empty() || heard.is_empty() {
         return;
     }
-    if query.len().saturating_mul(heard.len()) > MONOTONIC_CELL_LIMIT && query.len() > 1 && heard.len() > 1 {
+    if query.len().saturating_mul(heard.len()) > MONOTONIC_CELL_LIMIT
+        && query.len() > 1
+        && heard.len() > 1
+    {
         let mid = query.len() / 2;
-        let target = heard[0].1 + (heard[heard.len() - 1].1 - heard[0].1) * mid as i64 / query.len() as i64;
-        let split = heard.partition_point(|item| item.1 < target).clamp(1, heard.len() - 1);
-        assign_monotonic(&query[..mid], &heard[..split], &mut assigned[..mid], &mut matched[..mid]);
-        assign_monotonic(&query[mid..], &heard[split..], &mut assigned[mid..], &mut matched[mid..]);
+        let target =
+            heard[0].1 + (heard[heard.len() - 1].1 - heard[0].1) * mid as i64 / query.len() as i64;
+        let split = heard
+            .partition_point(|item| item.1 < target)
+            .clamp(1, heard.len() - 1);
+        assign_monotonic(
+            &query[..mid],
+            &heard[..split],
+            &mut assigned[..mid],
+            &mut matched[..mid],
+        );
+        assign_monotonic(
+            &query[mid..],
+            &heard[split..],
+            &mut assigned[mid..],
+            &mut matched[mid..],
+        );
         return;
     }
     let n = query.len();
@@ -1320,7 +1405,11 @@ fn interpolate_frames(frames: &mut [Option<i64>]) {
             end += 1;
         }
         let left = if index > 0 { frames[index - 1] } else { None };
-        let right = if end < frames.len() { frames[end] } else { None };
+        let right = if end < frames.len() {
+            frames[end]
+        } else {
+            None
+        };
         match (left, right) {
             (Some(start), Some(stop)) => {
                 let den = (end - (index - 1)) as i64;
@@ -1438,7 +1527,10 @@ mod tests {
             "thankyou left the early spike: {placed:?}"
         );
         assert!(
-            placed.iter().take(thank).all(|(frame, _)| *frame < early_end),
+            placed
+                .iter()
+                .take(thank)
+                .all(|(frame, _)| *frame < early_end),
             "{placed:?}"
         );
     }
@@ -1493,15 +1585,24 @@ mod tests {
             data[frame * CLASSES] = -1.0;
             data[frame * CLASSES + id] = 0.0;
         }
-        let emissions = Emissions { classes: CLASSES, data, times };
+        let emissions = Emissions {
+            classes: CLASSES,
+            data,
+            times,
+        };
         let labels: Vec<i32> = "foreword".chars().map(|ch| label_of(ch).unwrap()).collect();
         let aligned = forced_align(&emissions, &labels, &[], CLASSES as i32, false);
         assert!(
-            aligned.iter().all(|token| (10..=22).contains(&token.start_frame)),
+            aligned
+                .iter()
+                .all(|token| (10..=22).contains(&token.start_frame)),
             "{aligned:?}"
         );
         assert!(aligned[0].score > -1.0 && aligned[4].score > -1.0 && aligned[7].score > -1.0);
-        assert!(aligned[3].score < -4.0 && aligned[5].score < -4.0, "{aligned:?}");
+        assert!(
+            aligned[3].score < -4.0 && aligned[5].score < -4.0,
+            "{aligned:?}"
+        );
     }
 
     #[test]
@@ -1533,11 +1634,17 @@ mod tests {
             data[frame * CLASSES] = -1.0;
             data[frame * CLASSES + id] = 0.0;
         }
-        let emissions = Emissions { classes: CLASSES, data, times };
+        let emissions = Emissions {
+            classes: CLASSES,
+            data,
+            times,
+        };
         let labels: Vec<i32> = "foreword".chars().map(|ch| label_of(ch).unwrap()).collect();
         let aligned = forced_align(&emissions, &labels, &[], CLASSES as i32, false);
         assert!(
-            aligned.iter().all(|token| (10..=22).contains(&token.start_frame)),
+            aligned
+                .iter()
+                .all(|token| (10..=22).contains(&token.start_frame)),
             "{aligned:?}"
         );
     }
@@ -1588,7 +1695,11 @@ mod tests {
         for t in 0..frames {
             times.push(t as f64 * 0.02);
         }
-        let emissions = Emissions { classes: CLASSES, data, times };
+        let emissions = Emissions {
+            classes: CLASSES,
+            data,
+            times,
+        };
         let found = find_boundaries(&query, &emissions, &[]).expect("boundary");
         assert!(found.confidence >= MIN_CONFIDENCE);
         assert!(found.end > found.start);
@@ -1623,7 +1734,11 @@ mod tests {
             data[frame * CLASSES] = -2.0;
             data[frame * CLASSES + id] = 0.0;
         }
-        let emissions = Emissions { classes: CLASSES, data, times };
+        let emissions = Emissions {
+            classes: CLASSES,
+            data,
+            times,
+        };
         let found = find_boundaries(&query, &emissions, &[]).expect("boundary");
         assert!(
             found.end < late_origin as i64,
