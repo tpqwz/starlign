@@ -26,9 +26,9 @@ From `starlign/`:
 cargo build --release --locked
 ```
 
-Linux cannot link a Mac build. See [docs/macos.md](docs/macos.md). The Mac workflow on GitHub runs only when someone starts it by hand.
+Linux cannot link a Mac build. See [docs/macos.md](docs/macos.md). A push to main makes GitHub build Linux, Windows, and both kinds of Mac, and attach the zips to the alpha release. Each zip has ONNX Runtime 1.22 beside the tool. The speech weights are not in the zip. CUDA is not in the zip.
 
-This tree holds the source. The built tools are not kept here. They still need ONNX Runtime 1.22 beside them before they can run the net.
+This tree holds the source. The built tools are not kept here.
 
 ## Sharing
 

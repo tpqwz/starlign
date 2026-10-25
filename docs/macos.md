@@ -38,6 +38,6 @@ lib/libonnxruntime.1.22.0.dylib
 
 ## On GitHub
 
-`.github/workflows/macos.yml` runs on GitHub's Mac runners, which have the Apple SDK. After this repository is on GitHub, open Actions, choose macOS, and run the workflow. It builds both architectures and attaches the matching official ONNX Runtime dylib. The artifacts are the runnable folders. They do not contain the model weights.
+`.github/workflows/release.yml` builds Linux, Windows, and both Mac kinds on GitHub's machines. It runs on every push to `main`, and when someone starts it from the Actions tab. A tag named `v*` publishes that tag instead of refreshing `alpha`.
 
-The workflow does not run until someone starts it.
+The Mac halves run on GitHub's Mac machines, which have the Apple SDK. Each release zip has the matching official ONNX Runtime 1.22 library in `lib/` next to the binary. The weights are not in the zip. CUDA is not in the zip. The release is marked as a prerelease.
