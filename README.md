@@ -1,5 +1,7 @@
 # starlign
 
+This is beta. The tool is early, and it may still shift.
+
 starlign lines up an audiobook with an EPUB and writes an EPUB 3 media overlay. The sound is put in as it was. It is not made again.
 
 One Rust tool does the work. A window opens when you start it. The same tool also runs from the shell as `run`, `emit`, or `align`.
