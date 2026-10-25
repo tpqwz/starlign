@@ -7,11 +7,27 @@ target="${1:?target}"
 archive="${2:?archive}"
 ext="${3:?ext}"
 
+py() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 "$@"
+  else
+    python "$@"
+  fi
+}
+
 url="https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/${archive}.${ext}"
 curl -fL --retry 3 -o ort.pkg "$url"
 rm -rf ort-src
 mkdir ort-src
-tar -xf ort.pkg -C ort-src
+if [ "$ext" = "zip" ]; then
+  # Git's tar on Windows does not unpack zip files.
+  py - ort.pkg ort-src << 'PY'
+import sys, zipfile
+zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])
+PY
+else
+  tar -xf ort.pkg -C ort-src
+fi
 
 libdir=""
 while IFS= read -r dir; do
@@ -55,5 +71,15 @@ else
 fi
 
 rm -f "${stage}.zip"
-tar -a -cf "${stage}.zip" "$stage"
+py - "$stage" << 'PY'
+import os, sys, zipfile
+stage = sys.argv[1]
+out = stage + ".zip"
+with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+    for dirpath, _, names in os.walk(stage):
+        for name in names:
+            full = os.path.join(dirpath, name)
+            arc = os.path.relpath(full, ".").replace("\\", "/")
+            zf.write(full, arc)
+PY
 test -s "${stage}.zip"
